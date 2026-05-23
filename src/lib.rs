@@ -9,6 +9,7 @@
 pub mod dispatcher;
 pub mod error;
 pub mod migrate;
+pub mod notify_stream;
 pub mod pool;
 pub mod rpc;
 pub mod run_loop;

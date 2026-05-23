@@ -27,6 +27,11 @@
         "aarch64-darwin"
       ];
 
+      flake = {
+        homeManagerModules.default = import ./nix/module.nix;
+        homeManagerModules.satan-attrd = import ./nix/module.nix;
+      };
+
       perSystem = {
         pkgs,
         system,
