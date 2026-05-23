@@ -1,20 +1,20 @@
 //! satan-attrd — SATAN attribute layer daemon.
 //!
-//! T-attr-1b implements two subcommands:
+//! Three subcommands:
 //!
 //! ```text
 //! satan-attrd migrate    — run pending schema migrations and exit
 //! satan-attrd rebuild    — replay event log into the projection
 //!                          (`--include-disabled` to include disabled events)
+//! satan-attrd run        — LISTEN satan_outcome_inbox, dispatch §6/§7,
+//!                          enqueue attribute.delta_applied for the broker
 //! ```
-//!
-//! `satan-attrd run` (the LISTENer / dispatcher loop) lands with T-attr-1c.
 
 use std::process::ExitCode;
 
 use tracing_subscriber::{EnvFilter, fmt};
 
-use satan_attrd::{migrate, pool, store};
+use satan_attrd::{migrate, pool, run_loop, store};
 
 fn init_tracing() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
@@ -30,7 +30,7 @@ fn print_usage() {
     eprintln!(
         "satan-attrd {ver}\n\
          \n\
-         usage:\n  satan-attrd migrate\n  satan-attrd rebuild [--include-disabled]\n",
+         usage:\n  satan-attrd migrate\n  satan-attrd rebuild [--include-disabled]\n  satan-attrd run\n",
         ver = satan_attrd::VERSION,
     );
 }
@@ -74,6 +74,13 @@ async fn main() -> ExitCode {
                 }
             }
         }
+        "run" => match run_loop_subcommand(&url).await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                tracing::error!(?e, "run loop terminated with error");
+                ExitCode::FAILURE
+            }
+        },
         other => {
             tracing::error!(cmd = other, "unknown subcommand");
             print_usage();
@@ -92,4 +99,9 @@ async fn run_migrate(url: &str) -> satan_attrd::Result<()> {
 async fn run_rebuild(url: &str, include_disabled: bool) -> satan_attrd::Result<usize> {
     let pool = pool::create_pool(url).await?;
     store::rebuild_projection(&pool, include_disabled).await
+}
+
+async fn run_loop_subcommand(url: &str) -> satan_attrd::Result<()> {
+    let pool = pool::create_pool(url).await?;
+    run_loop::RunLoop::new(pool).run().await
 }

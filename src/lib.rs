@@ -10,6 +10,8 @@ pub mod dispatcher;
 pub mod error;
 pub mod migrate;
 pub mod pool;
+pub mod rpc;
+pub mod run_loop;
 pub mod store;
 pub mod types;
 
