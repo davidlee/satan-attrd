@@ -2,9 +2,25 @@
 
 ## Where this leaves things
 
-Empty scaffold landed on **2026-05-23**. No schema, no store, no
-dispatcher. Cargo build green; `cargo check` passes; that's the
-scaffold contract.
+**T-attr-1b shipped 2026-05-23** — migration + store + per-run seq
+counter + projection rebuild driver + 22 tests (11 unit + 11
+integration). `migrate` and `rebuild` CLI subcommands. No dispatcher
+yet (T-attr-1c). No LISTENer / RPC loop yet (T-attr-1c).
+
+Test DB: `satan_memory_test` on the local PG socket
+(`postgres:///satan_memory_test?host=/run/postgresql`). Same DB the
+broker's memory + intervention tests target — the attribute layer
+shares the SATAN database with the broker (contract §4 — "two
+Postgres tables in the existing SATAN database").
+
+Local gate:
+
+```bash
+DATABASE_URL='postgres:///satan_memory_test?host=/run/postgresql' \
+  cargo test --offline
+```
+
+(`just test` once the devshell is in place.)
 
 ## Read first
 
@@ -133,23 +149,40 @@ Cargo.toml deps + Justfile + crate layout lifted from
   not `id` (lexicographic sort breaks at `attr10` vs `attr9`).
   Contract §10.4.
 
-## First concrete step (T-attr-1b)
+## First concrete step (T-attr-1c)
 
-1. Write `migrations/0007_attributes.sql` per contract §4 verbatim
-   (the SQL in §4.1 and §4.2 is normative; the expression index
-   from §6.2.1 must be included).
-2. Add `src/error.rs`, `src/pool.rs`, `src/migrate.rs` (lift from
-   `~/dev/vk/db/src/{error,pool,migrate.rs}` with names trimmed).
-3. Add `src/store.rs`: UPSERT projection, INSERT event, per-run seq
-   counter (an in-process atomic; reset between runs is a test
-   concern), `lookup_by_intervention`.
-4. Integration tests in `tests/store.rs` — round-trip both tables,
-   counter monotonicity within a run, the expression index is
-   actually used (EXPLAIN ANALYZE check).
-5. Validator widening for `attribute.delta_applied` is **broker-
-   side** (stays in elisp `dl-satan-audit.el`). T-attr-1b's broker
-   PR ships that in `~/.emacs.d/`; this daemon does not validate
-   transcript events.
+1. `src/dispatcher.rs` — consume the broker's intervention outcome
+   event (received via the §17.3 PG queue + `pg_notify` bus, NOT
+   yet wired here; T-attr-1c lands both pieces). Apply contract §6
+   delta table + §6.1 confidence weighting + §6.3 pre-dispatch
+   snapshot + §7 caps. For each affected attribute: call
+   `store::insert_event` + (when not disabled) `store::upsert_attribute`.
+2. `src/rpc.rs` — RPC the constructed `attribute.delta_applied`
+   event back to the broker for transcript writing (contract §17.4).
+   Pick a transport; the existing `dl-satan-patch-listener.el` uses
+   PG NOTIFY for the broker-to-daemon direction — match it for the
+   reverse direction (daemon emits to a `satan_audit_inbox` queue
+   table, broker LISTENs).
+3. `src/main.rs` — gain a `run` subcommand that opens the pool,
+   LISTENs on the broker's outcome-event channel, and dispatches
+   each notification through `dispatcher::handle`. Reuse the
+   `Counter` state per `run_id` via a `HashMap<String, Counter>`
+   (drop entries when the run ends — broker emits a run-end
+   signal? if not, last-touched LRU).
+4. Tests — `tests/dispatcher.rs` with the §12 contract test
+   surface: golden 15-case delta table (5 classifications × 3
+   confidences); pre-dispatch snapshot ordering;
+   revision-against-actual-prior-deltas (seed a prior outcome that
+   hit `range_clamp`, then revise; assert revision_delta computed
+   against actual not theoretical); revision chain. `friction_cap`
+   tests use a **direct-store helper** to synthesise a positive
+   friction delta (no v1 outcome can produce one — §7.1
+   forward-compat note).
+
+T-attr-1c is the first PR with model-influencing behaviour. Pin
+the broker-side wiring (queue table schema, channel names, the
+broker's outcome emitter changes) in the contract before code if
+they require a new audit-event shape.
 
 `just check` must stay green at every step. `cargo clippy` is
 `-D unwrap_used -D expect_used`.
