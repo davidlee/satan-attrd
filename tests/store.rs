@@ -329,12 +329,51 @@ async fn prior_event_lookup_filters_by_intervention_and_name() {
 #[tokio::test]
 async fn prior_event_lookup_uses_expression_index() {
     let pool = common::shared_pool().await;
-    // EXPLAIN against a non-matching id avoids row work but exercises the planner.
+    let run_id = common::unique_run_id();
+    let counter = Counter::new();
+    let base_ts = Utc::now();
+
+    // Bulk-seed + ANALYZE. With only a handful of rows the planner picks a
+    // Seq Scan regardless of indexing — index cost > seq-scan cost on a tiny
+    // relation. Seed 500 events with distinct intervention_ids so a lookup
+    // by one id has ~0.2% selectivity, then ANALYZE so the planner sees the
+    // distribution and prefers the expression index.
+    for i in 0..500 {
+        let ev = EventInsert {
+            run_id: run_id.clone(),
+            seq: counter.next(),
+            ts: base_ts + Duration::milliseconds(i),
+            scope: Scope::Global,
+            name: AttributeName::Shame,
+            old_value: 0.0,
+            new_value: 0.05,
+            source: "outcome".into(),
+            reason: "ignored".into(),
+            evidence_json: outcome_evidence_json(
+                &format!("{run_id}.iv{i:04}"),
+                "ignored",
+                "low",
+                Some("notify"),
+                None,
+                &[],
+                &[],
+            ),
+            caps_applied: vec![],
+            disabled: false,
+        };
+        insert_event(&pool, &ev).await.unwrap();
+    }
+    sqlx::query("ANALYZE satan_attribute_events")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let target_iv = format!("{run_id}.iv0042");
     let plan: Vec<(String,)> = sqlx::query_as(
         "EXPLAIN SELECT id FROM satan_attribute_events
          WHERE evidence_json->>'intervention_id' = $1 AND name = $2",
     )
-    .bind("nope-intervention-id-xyz")
+    .bind(&target_iv)
     .bind("shame")
     .fetch_all(&pool)
     .await
@@ -348,6 +387,8 @@ async fn prior_event_lookup_uses_expression_index() {
         plan_text.contains("satan_attribute_events_iv_idx"),
         "expression index should appear in EXPLAIN plan; got:\n{plan_text}"
     );
+
+    common::cleanup_run(&pool, &run_id).await;
 }
 
 // ---------------------------------------------------------------------------

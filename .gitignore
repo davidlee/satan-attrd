@@ -3,6 +3,8 @@
 /.direnv
 *.log
 
+*.local.md
+
 # editor / agent scratch
 /.tmp
 /.claude/settings.local.json
