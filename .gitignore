@@ -1,0 +1,13 @@
+/target
+/result
+/.direnv
+*.log
+
+# editor / agent scratch
+/.tmp
+/.claude/settings.local.json
+/.claude/worktrees
+/w-*
+/.worktrees
+
+.*cache*
