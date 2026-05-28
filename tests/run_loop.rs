@@ -76,13 +76,11 @@ async fn event_count_for_run(pool: &PgPool, run_id: &str) -> i64 {
 
 async fn cleanup(pool: &PgPool, run_id: &str) {
     cleanup_run(pool, run_id).await;
-    sqlx::query(
-        "DELETE FROM satan_audit_inbox WHERE payload_json->>'id' LIKE $1",
-    )
-    .bind(format!("{run_id}.attr%"))
-    .execute(pool)
-    .await
-    .unwrap();
+    sqlx::query("DELETE FROM satan_audit_inbox WHERE payload_json->>'id' LIKE $1")
+        .bind(format!("{run_id}.attr%"))
+        .execute(pool)
+        .await
+        .unwrap();
     sqlx::query("DELETE FROM satan_outcome_inbox WHERE payload_json->>'run_id' = $1")
         .bind(run_id)
         .execute(pool)
@@ -141,12 +139,11 @@ async fn outcome_inbox_to_audit_inbox_end_to_end_contradicted_medium() {
     }
 
     // satan_outcome_inbox row consumed (deleted).
-    let pending: Vec<(i32,)> =
-        sqlx::query_as("SELECT id FROM satan_outcome_inbox WHERE id = $1")
-            .bind(inbox_id)
-            .fetch_all(&pool)
-            .await
-            .unwrap();
+    let pending: Vec<(i32,)> = sqlx::query_as("SELECT id FROM satan_outcome_inbox WHERE id = $1")
+        .bind(inbox_id)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
     assert!(pending.is_empty(), "outcome inbox row not deleted");
 
     cleanup(&pool, &run_id).await;
@@ -245,12 +242,11 @@ async fn outcome_inbox_rejects_bad_schema_version() {
 
     // No events; inbox row dropped.
     assert_eq!(event_count_for_run(&pool, &run_id).await, 0);
-    let pending: Vec<(i32,)> =
-        sqlx::query_as("SELECT id FROM satan_outcome_inbox WHERE id = $1")
-            .bind(inbox_id)
-            .fetch_all(&pool)
-            .await
-            .unwrap();
+    let pending: Vec<(i32,)> = sqlx::query_as("SELECT id FROM satan_outcome_inbox WHERE id = $1")
+        .bind(inbox_id)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
     assert!(pending.is_empty());
 
     cleanup(&pool, &run_id).await;

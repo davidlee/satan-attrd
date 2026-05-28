@@ -127,11 +127,13 @@ impl FromStr for Scope {
 pub enum Source {
     /// IMPLEMENTED in T-attr-1c.
     Outcome,
+    /// IMPLEMENTED in T-attr-1d-hc.
+    Hippocampus,
     /// RESERVED; T-attr-1e.
     Percept,
     /// RESERVED; T-attr-1e.
     Resonance,
-    /// RESERVED; T-attr-1e.
+    /// IMPLEMENTED in T-attr-1e-sensor.
     Sensor,
     /// RESERVED; T-attr-1e.
     ToolError,
@@ -144,6 +146,7 @@ impl Source {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Outcome => "outcome",
+            Self::Hippocampus => "hippocampus",
             Self::Percept => "percept",
             Self::Resonance => "resonance",
             Self::Sensor => "sensor",
@@ -155,6 +158,12 @@ impl Source {
     /// True for sources whose `reason` enum is fixed in the contract today.
     #[must_use]
     pub const fn is_implemented(self) -> bool {
+        matches!(self, Self::Outcome | Self::Hippocampus | Self::Sensor)
+    }
+
+    /// True for sources that support outcome revision (§6.2).
+    #[must_use]
+    pub const fn supports_revision(self) -> bool {
         matches!(self, Self::Outcome)
     }
 }
@@ -170,6 +179,7 @@ impl FromStr for Source {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "outcome" => Ok(Self::Outcome),
+            "hippocampus" => Ok(Self::Hippocampus),
             "percept" => Ok(Self::Percept),
             "resonance" => Ok(Self::Resonance),
             "sensor" => Ok(Self::Sensor),
@@ -231,6 +241,103 @@ impl FromStr for OutcomeReason {
 }
 
 // ---------------------------------------------------------------------------
+// Hippocampus reasons (contract §6H)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HippocampusReason {
+    Written,
+    Overwritten,
+    Deleted,
+    Renamed,
+    Searched,
+    TraceMarked,
+}
+
+impl HippocampusReason {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Written => "written",
+            Self::Overwritten => "overwritten",
+            Self::Deleted => "deleted",
+            Self::Renamed => "renamed",
+            Self::Searched => "searched",
+            Self::TraceMarked => "trace_marked",
+        }
+    }
+}
+
+impl fmt::Display for HippocampusReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for HippocampusReason {
+    type Err = crate::error::Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "written" => Ok(Self::Written),
+            "overwritten" => Ok(Self::Overwritten),
+            "deleted" => Ok(Self::Deleted),
+            "renamed" => Ok(Self::Renamed),
+            "searched" => Ok(Self::Searched),
+            "trace_marked" => Ok(Self::TraceMarked),
+            other => Err(crate::error::Error::InvalidReason {
+                source_name: Source::Hippocampus.as_str().to_string(),
+                reason: other.to_string(),
+            }),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Sensor reasons (contract §6S)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SensorReason {
+    SegmentBacklog,
+    TypingActive,
+    TypingIdle,
+}
+
+impl SensorReason {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SegmentBacklog => "segment_backlog",
+            Self::TypingActive => "typing_active",
+            Self::TypingIdle => "typing_idle",
+        }
+    }
+}
+
+impl fmt::Display for SensorReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for SensorReason {
+    type Err = crate::error::Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "segment_backlog" => Ok(Self::SegmentBacklog),
+            "typing_active" => Ok(Self::TypingActive),
+            "typing_idle" => Ok(Self::TypingIdle),
+            other => Err(crate::error::Error::InvalidReason {
+                source_name: Source::Sensor.as_str().to_string(),
+                reason: other.to_string(),
+            }),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Cap names (contract §7)
 // ---------------------------------------------------------------------------
 
@@ -274,9 +381,10 @@ mod tests {
     #[test]
     fn source_implementation_status() {
         assert!(Source::Outcome.is_implemented());
+        assert!(Source::Hippocampus.is_implemented());
+        assert!(Source::Sensor.is_implemented());
         assert!(!Source::Percept.is_implemented());
         assert!(!Source::Resonance.is_implemented());
-        assert!(!Source::Sensor.is_implemented());
         assert!(!Source::ToolError.is_implemented());
         assert!(!Source::Manual.is_implemented());
     }
@@ -305,6 +413,31 @@ mod tests {
             OutcomeReason::Harmful,
         ] {
             assert_eq!(OutcomeReason::from_str(r.as_str()).unwrap(), r);
+        }
+    }
+
+    #[test]
+    fn hippocampus_reason_round_trip() {
+        for r in [
+            HippocampusReason::Written,
+            HippocampusReason::Overwritten,
+            HippocampusReason::Deleted,
+            HippocampusReason::Renamed,
+            HippocampusReason::Searched,
+            HippocampusReason::TraceMarked,
+        ] {
+            assert_eq!(HippocampusReason::from_str(r.as_str()).unwrap(), r);
+        }
+    }
+
+    #[test]
+    fn sensor_reason_round_trip() {
+        for r in [
+            SensorReason::SegmentBacklog,
+            SensorReason::TypingActive,
+            SensorReason::TypingIdle,
+        ] {
+            assert_eq!(SensorReason::from_str(r.as_str()).unwrap(), r);
         }
     }
 

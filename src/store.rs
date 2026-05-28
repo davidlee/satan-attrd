@@ -252,13 +252,15 @@ pub async fn lookup_attribute(
     .fetch_optional(pool)
     .await?;
 
-    Ok(row.map(|(scope, name, value, updated_at, ev)| AttributeRow {
-        scope,
-        name,
-        value,
-        updated_at,
-        evidence_json: ev.0,
-    }))
+    Ok(
+        row.map(|(scope, name, value, updated_at, ev)| AttributeRow {
+            scope,
+            name,
+            value,
+            updated_at,
+            evidence_json: ev.0,
+        }),
+    )
 }
 
 /// Prior `attribute.delta_applied` events for the same intervention id (any

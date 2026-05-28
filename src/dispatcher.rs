@@ -1,20 +1,18 @@
-//! Outcome → attribute delta dispatcher (T-attr-1c).
+//! Attribute delta dispatcher (outcome §6, hippocampus §6H, sensor §6S).
 //!
 //! Pure-function core:
 //!
-//! - `base_deltas` returns the contract §6 row for an `OutcomeReason`.
+//! - Delta tables live in `tuning.rs`. This module imports them and wires
+//!   `dispatch_outcome`, `dispatch_hippocampus`, `dispatch_sensor`.
 //! - `weight_delta` applies §6.1 confidence weighting with upper-bound
 //!   magnitude clamp (no lower-bound clamp — `:low` is allowed to produce
 //!   sub-`small` deltas).
 //! - `plan_for` applies §7 caps (`friction_cap` + `range_clamp`) using a
 //!   pre-dispatch `(doubt, shame)` snapshot per §6.3.
-//! - `dispatch_outcome` (first emit) and `dispatch_revision` (compute
-//!   against actually-logged prior deltas per §6.2) return ready-to-insert
-//!   `EventInsert` rows.
+//! - `dispatch_revision` computes against actually-logged prior deltas per §6.2.
 //!
-//! The dispatcher does NOT touch Postgres. The caller (run loop in main.rs)
-//! reads the projection snapshot, walks the prior-event log to build the
-//! `prior_actuals` map for revisions, allocates `seq` via `Counter`, calls
+//! The dispatcher does NOT touch Postgres. The caller (run loop) reads the
+//! projection snapshot, allocates `seq` via `Counter`, calls
 //! `store::insert_event` + (when not disabled) `store::upsert_attribute`,
 //! and RPCs each event back to the broker for transcript writing
 //! (contract §17.3 + §17.4).
@@ -27,7 +25,10 @@ use sqlx::PgPool;
 
 use crate::error::{Error, Result};
 use crate::store::{Counter, EventInsert, lookup_prior_events_by_intervention};
-use crate::types::{AttributeName, Cap, OutcomeReason, Scope, Source};
+use crate::tuning;
+use crate::types::{
+    AttributeName, Cap, HippocampusReason, OutcomeReason, Scope, SensorReason, Source,
+};
 
 // ---------------------------------------------------------------------------
 // Confidence (§6.1)
@@ -44,9 +45,9 @@ impl Confidence {
     #[must_use]
     pub const fn weight(self) -> f64 {
         match self {
-            Self::Low => 0.5,
-            Self::Medium => 1.0,
-            Self::High => 1.5,
+            Self::Low => tuning::CONFIDENCE_LOW,
+            Self::Medium => tuning::CONFIDENCE_MEDIUM,
+            Self::High => tuning::CONFIDENCE_HIGH,
         }
     }
 
@@ -88,38 +89,19 @@ pub struct Snapshot {
 // §6 base delta table
 // ---------------------------------------------------------------------------
 
-/// Canonical attribute order for `base_deltas`: friction, shame, doubt,
-/// hunger, suspicion, brooding, metamorphosis. Column 1 (friction) is NOT
-/// optional — readers must not skip it (contract §6 column-order note).
-pub const ATTR_ORDER: [AttributeName; 7] = [
-    AttributeName::Friction,
-    AttributeName::Shame,
-    AttributeName::Doubt,
-    AttributeName::Hunger,
-    AttributeName::Suspicion,
-    AttributeName::Brooding,
-    AttributeName::Metamorphosis,
-];
+/// Canonical attribute order for delta table arrays. 8 elements:
+/// curiosity, friction, shame, doubt, hunger, suspicion, brooding,
+/// metamorphosis. Re-exported from `tuning`.
+pub const ATTR_ORDER: [AttributeName; 8] = tuning::ATTR_ORDER;
 
-/// §6 base delta row for `reason`. Order matches `ATTR_ORDER`.
-///
-/// The `worked shame = -0.025` entry is a deliberate sub-`small` exception
-/// (contract §6 footnote 1). The `contradicted suspicion = -0.05` and
-/// `harmful suspicion = 0` entries reflect global-only scope (§6 footnotes
-/// 2 + 3) — per-pattern consequences live in pattern records, not here.
+/// §6 base delta row for `reason`. Order matches `ATTR_ORDER` (8 elements).
+/// Delegates to `tuning::outcome_base_deltas`.
 #[must_use]
-pub const fn base_deltas(reason: OutcomeReason) -> [f64; 7] {
-    match reason {
-        OutcomeReason::Worked => [0.0, -0.025, -0.05, -0.05, 0.0, 0.05, 0.0],
-        OutcomeReason::Neutral => [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-        OutcomeReason::Ignored => [-0.05, 0.05, 0.05, 0.0, 0.0, 0.05, 0.0],
-        OutcomeReason::Contradicted => [-0.15, 0.15, 0.15, 0.0, -0.05, 0.0, 0.05],
-        OutcomeReason::Harmful => [-0.30, 0.30, 0.30, 0.0, 0.0, 0.0, 0.15],
-    }
+pub const fn base_deltas(reason: OutcomeReason) -> [f64; 8] {
+    tuning::outcome_base_deltas(reason)
 }
 
-/// Returns the affected (non-zero base) attributes for one reason. Order is
-/// `ATTR_ORDER` so the result is deterministic.
+/// Returns the affected (non-zero base) attributes for one outcome reason.
 #[must_use]
 pub fn affected(reason: OutcomeReason) -> Vec<AttributeName> {
     let row = base_deltas(reason);
@@ -130,15 +112,16 @@ pub fn affected(reason: OutcomeReason) -> Vec<AttributeName> {
         .collect()
 }
 
-/// §6.1 confidence weight + upper-bound magnitude clamp (`±0.30`). No
-/// lower-bound clamp — `low` is allowed to produce sub-`small` deltas.
+/// §6.1 confidence weight + upper-bound magnitude clamp. No lower-bound
+/// clamp — `low` is allowed to produce sub-`small` deltas.
 #[must_use]
 pub fn weight_delta(base: f64, conf: Confidence) -> f64 {
     let w = base * conf.weight();
-    w.clamp(-CONFIDENCE_MAGNITUDE_CAP, CONFIDENCE_MAGNITUDE_CAP)
+    w.clamp(
+        -tuning::CONFIDENCE_MAGNITUDE_CAP,
+        tuning::CONFIDENCE_MAGNITUDE_CAP,
+    )
 }
-
-const CONFIDENCE_MAGNITUDE_CAP: f64 = 0.30;
 
 // ---------------------------------------------------------------------------
 // Per-attribute plan
@@ -158,7 +141,12 @@ pub struct AttributePlan {
 /// current projection value. `snap` is the pre-dispatch `(doubt, shame)`
 /// snapshot used by `friction_cap`.
 #[must_use]
-pub fn plan_for(name: AttributeName, delta_in: f64, old_value: f64, snap: Snapshot) -> AttributePlan {
+pub fn plan_for(
+    name: AttributeName,
+    delta_in: f64,
+    old_value: f64,
+    snap: Snapshot,
+) -> AttributePlan {
     let mut new_value = old_value + delta_in;
     let mut caps = Vec::new();
 
@@ -311,6 +299,126 @@ pub fn dispatch_revision(input: &RevisionInput, counter: &Counter) -> Vec<EventI
 }
 
 // ---------------------------------------------------------------------------
+// Hippocampus dispatch (contract §6H)
+// ---------------------------------------------------------------------------
+
+/// §6H.2 base delta row for hippocampus `reason`. Order matches `ATTR_ORDER`
+/// (8 elements). Delegates to `tuning::hippocampus_base_deltas`.
+#[must_use]
+pub const fn hippocampus_base_deltas(reason: HippocampusReason) -> [f64; 8] {
+    tuning::hippocampus_base_deltas(reason)
+}
+
+/// Inputs to a hippocampus dispatch. No confidence, intervention_id, or
+/// cue dimensions — hippocampus actions are binary (§6H.3).
+#[derive(Debug, Clone)]
+pub struct HippocampusInput {
+    pub run_id: String,
+    pub ts: DateTime<Utc>,
+    pub reason: HippocampusReason,
+    pub tool_name: String,
+    pub filename: String,
+    pub enabled: bool,
+    pub snapshot: Snapshot,
+    pub projection: HashMap<AttributeName, f64>,
+}
+
+/// Hippocampus dispatch (§6H). Returns one `EventInsert` per affected
+/// attribute (non-zero base). No confidence weighting, no revision path.
+pub fn dispatch_hippocampus(input: &HippocampusInput, counter: &Counter) -> Vec<EventInsert> {
+    let row = hippocampus_base_deltas(input.reason);
+    let mut out = Vec::new();
+    for (idx, name) in ATTR_ORDER.iter().enumerate() {
+        let base = row[idx];
+        if base == 0.0 {
+            continue;
+        }
+        let old = input.projection.get(name).copied().unwrap_or(0.0);
+        let plan = plan_for(*name, base, old, input.snapshot);
+        let evidence = json!({
+            "tool_name": input.tool_name,
+            "filename": input.filename,
+        });
+        out.push(EventInsert {
+            run_id: input.run_id.clone(),
+            seq: counter.next(),
+            ts: input.ts,
+            scope: Scope::Global,
+            name: *name,
+            old_value: plan.old_value,
+            new_value: plan.new_value,
+            source: Source::Hippocampus.as_str().to_string(),
+            reason: input.reason.as_str().to_string(),
+            evidence_json: evidence,
+            caps_applied: plan.caps_applied.clone(),
+            disabled: !input.enabled,
+        });
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Sensor dispatch (contract §6S)
+// ---------------------------------------------------------------------------
+
+/// §6S base delta row for sensor `reason`. Order matches `ATTR_ORDER`
+/// (8 elements). Delegates to `tuning::sensor_base_deltas`.
+#[must_use]
+pub const fn sensor_base_deltas(reason: SensorReason) -> [f64; 8] {
+    tuning::sensor_base_deltas(reason)
+}
+
+/// Inputs to a sensor dispatch. No confidence, no revision — sensor signals
+/// are binary (§6S.3).
+#[derive(Debug, Clone)]
+pub struct SensorInput {
+    pub run_id: String,
+    pub ts: DateTime<Utc>,
+    pub reason: SensorReason,
+    pub sensor_type: String,
+    pub metric_value: f64,
+    pub metric_unit: String,
+    pub enabled: bool,
+    pub snapshot: Snapshot,
+    pub projection: HashMap<AttributeName, f64>,
+}
+
+/// Sensor dispatch (§6S). Returns one `EventInsert` per affected attribute
+/// (non-zero base). No confidence weighting, no revision path.
+pub fn dispatch_sensor(input: &SensorInput, counter: &Counter) -> Vec<EventInsert> {
+    let row = sensor_base_deltas(input.reason);
+    let mut out = Vec::new();
+    for (idx, name) in ATTR_ORDER.iter().enumerate() {
+        let base = row[idx];
+        if base == 0.0 {
+            continue;
+        }
+        let old = input.projection.get(name).copied().unwrap_or(0.0);
+        let plan = plan_for(*name, base, old, input.snapshot);
+        let evidence = json!({
+            "sensor_type": input.sensor_type,
+            "metric_value": input.metric_value,
+            "metric_unit": input.metric_unit,
+        });
+        out.push(EventInsert {
+            run_id: input.run_id.clone(),
+            seq: counter.next(),
+            ts: input.ts,
+            scope: Scope::Global,
+            name: *name,
+            old_value: plan.old_value,
+            new_value: plan.new_value,
+            source: Source::Sensor.as_str().to_string(),
+            reason: input.reason.as_str().to_string(),
+            evidence_json: evidence,
+            caps_applied: plan.caps_applied.clone(),
+            disabled: !input.enabled,
+        });
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
 // Evidence + EventInsert construction
 // ---------------------------------------------------------------------------
 
@@ -413,27 +521,26 @@ mod tests {
 
     #[test]
     fn base_deltas_match_contract_table() {
-        // Spot-check every row at a few positions.
-        // friction, shame, doubt, hunger, suspicion, brooding, metamorphosis
+        // curiosity, friction, shame, doubt, hunger, suspicion, brooding, metamorphosis
         assert_eq!(
             base_deltas(OutcomeReason::Worked),
-            [0.0, -0.025, -0.05, -0.05, 0.0, 0.05, 0.0]
+            [0.0, 0.0, -0.025, -0.05, -0.05, 0.0, 0.05, 0.0]
         );
         assert_eq!(
             base_deltas(OutcomeReason::Neutral),
-            [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+            [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
         );
         assert_eq!(
             base_deltas(OutcomeReason::Ignored),
-            [-0.05, 0.05, 0.05, 0.0, 0.0, 0.05, 0.0]
+            [0.0, -0.05, 0.05, 0.05, 0.0, 0.0, 0.05, 0.0]
         );
         assert_eq!(
             base_deltas(OutcomeReason::Contradicted),
-            [-0.15, 0.15, 0.15, 0.0, -0.05, 0.0, 0.05]
+            [0.0, -0.15, 0.15, 0.15, 0.0, -0.05, 0.0, 0.05]
         );
         assert_eq!(
             base_deltas(OutcomeReason::Harmful),
-            [-0.30, 0.30, 0.30, 0.0, 0.0, 0.0, 0.15]
+            [0.0, -0.30, 0.30, 0.30, 0.0, 0.0, 0.0, 0.15]
         );
     }
 
@@ -472,12 +579,7 @@ mod tests {
 
     #[test]
     fn plan_for_range_clamp_upper() {
-        let plan = plan_for(
-            AttributeName::Shame,
-            0.30,
-            0.85,
-            Snapshot::default(),
-        );
+        let plan = plan_for(AttributeName::Shame, 0.30, 0.85, Snapshot::default());
         assert!(close(plan.new_value, 1.0));
         assert!(plan.caps_applied.contains(&Cap::RangeClamp));
         // delta recomputed against the clamp.
@@ -486,12 +588,7 @@ mod tests {
 
     #[test]
     fn plan_for_range_clamp_lower() {
-        let plan = plan_for(
-            AttributeName::Friction,
-            -0.30,
-            0.10,
-            Snapshot::default(),
-        );
+        let plan = plan_for(AttributeName::Friction, -0.30, 0.10, Snapshot::default());
         assert!(close(plan.new_value, 0.0));
         assert!(plan.caps_applied.contains(&Cap::RangeClamp));
         assert!(close(plan.delta, -0.10));
@@ -500,7 +597,10 @@ mod tests {
     #[test]
     fn plan_for_friction_cap_only_restrains_positive() {
         // Snapshot says doubt=0.4, shame=0.4 → friction bound = 0.2.
-        let snap = Snapshot { doubt: 0.4, shame: 0.4 };
+        let snap = Snapshot {
+            doubt: 0.4,
+            shame: 0.4,
+        };
         // Positive friction delta exceeding bound → cap.
         let plan = plan_for(AttributeName::Friction, 0.25, 0.10, snap);
         assert!(close(plan.new_value, 0.2));
@@ -514,7 +614,10 @@ mod tests {
     #[test]
     fn plan_for_friction_cap_zero_when_inhibitors_exceed_one() {
         // doubt + shame > 1 → bound = max(0, negative) = 0.
-        let snap = Snapshot { doubt: 0.7, shame: 0.5 };
+        let snap = Snapshot {
+            doubt: 0.7,
+            shame: 0.5,
+        };
         let plan = plan_for(AttributeName::Friction, 0.10, 0.05, snap);
         assert!(close(plan.new_value, 0.0));
         assert!(plan.caps_applied.contains(&Cap::FrictionCap));
@@ -588,7 +691,10 @@ mod tests {
         // used (we control doubt/shame via snapshot, not via concurrent
         // shame/doubt deltas in the same event).
         let mut input = input_for(OutcomeReason::Harmful, Confidence::Medium);
-        input.snapshot = Snapshot { doubt: 0.0, shame: 0.0 };
+        input.snapshot = Snapshot {
+            doubt: 0.0,
+            shame: 0.0,
+        };
         input.projection.insert(AttributeName::Friction, 0.50);
         input.projection.insert(AttributeName::Shame, 0.10);
         input.projection.insert(AttributeName::Doubt, 0.10);
@@ -710,5 +816,277 @@ mod tests {
         for ev in &events {
             assert!(close(ev.delta(), 0.0), "expected zero delta, got {ev:?}");
         }
+    }
+
+    // --- Hippocampus dispatch (§6H) ---
+
+    fn hc_input(reason: HippocampusReason) -> HippocampusInput {
+        HippocampusInput {
+            run_id: "r1".into(),
+            ts: Utc::now(),
+            reason,
+            tool_name: format!("hippocampus_{}", reason.as_str()),
+            filename: "test.org".into(),
+            enabled: true,
+            snapshot: Snapshot::default(),
+            projection: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn hippocampus_base_deltas_match_contract() {
+        // curiosity, friction, shame, doubt, hunger, suspicion, brooding, metamorphosis
+        assert_eq!(
+            hippocampus_base_deltas(HippocampusReason::Written),
+            [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -0.025, 0.0]
+        );
+        assert_eq!(
+            hippocampus_base_deltas(HippocampusReason::Overwritten),
+            [0.0, 0.0, -0.025, 0.0, 0.0, 0.0, -0.025, 0.0]
+        );
+        assert_eq!(
+            hippocampus_base_deltas(HippocampusReason::Deleted),
+            [0.0, 0.0, -0.025, 0.0, 0.0, 0.0, -0.025, 0.0]
+        );
+        assert_eq!(
+            hippocampus_base_deltas(HippocampusReason::Renamed),
+            [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -0.025, 0.0]
+        );
+        assert_eq!(
+            hippocampus_base_deltas(HippocampusReason::Searched),
+            [0.0, 0.0, 0.0, 0.0, 0.0, 0.025, 0.0, 0.0]
+        );
+        assert_eq!(
+            hippocampus_base_deltas(HippocampusReason::TraceMarked),
+            [-0.05, 0.0, 0.0, 0.0, 0.0, 0.0, -0.025, 0.0]
+        );
+    }
+
+    #[test]
+    fn dispatch_hippocampus_written_affects_only_brooding() {
+        let mut input = hc_input(HippocampusReason::Written);
+        input.projection.insert(AttributeName::Brooding, 0.50);
+        let counter = Counter::new();
+        let events = dispatch_hippocampus(&input, &counter);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].name, AttributeName::Brooding);
+        assert!(close(events[0].delta(), -0.025));
+        assert_eq!(events[0].source, "hippocampus");
+        assert_eq!(events[0].reason, "written");
+    }
+
+    #[test]
+    fn dispatch_hippocampus_overwritten_affects_shame_and_brooding() {
+        let input = hc_input(HippocampusReason::Overwritten);
+        let counter = Counter::new();
+        let events = dispatch_hippocampus(&input, &counter);
+        assert_eq!(events.len(), 2);
+        let names: Vec<_> = events.iter().map(|e| e.name).collect();
+        assert!(names.contains(&AttributeName::Shame));
+        assert!(names.contains(&AttributeName::Brooding));
+    }
+
+    #[test]
+    fn dispatch_hippocampus_searched_affects_only_suspicion() {
+        let input = hc_input(HippocampusReason::Searched);
+        let counter = Counter::new();
+        let events = dispatch_hippocampus(&input, &counter);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].name, AttributeName::Suspicion);
+        assert!(close(events[0].delta(), 0.025));
+    }
+
+    #[test]
+    fn dispatch_hippocampus_no_confidence_weighting() {
+        let mut input = hc_input(HippocampusReason::Overwritten);
+        input.projection.insert(AttributeName::Shame, 0.50);
+        input.projection.insert(AttributeName::Brooding, 0.50);
+        let counter = Counter::new();
+        let events = dispatch_hippocampus(&input, &counter);
+        let shame = events
+            .iter()
+            .find(|e| e.name == AttributeName::Shame)
+            .unwrap();
+        assert!(close(shame.delta(), -0.025));
+        let brood = events
+            .iter()
+            .find(|e| e.name == AttributeName::Brooding)
+            .unwrap();
+        assert!(close(brood.delta(), -0.025));
+    }
+
+    #[test]
+    fn dispatch_hippocampus_range_clamp_applies() {
+        let mut input = hc_input(HippocampusReason::Written);
+        input.projection.insert(AttributeName::Brooding, 0.01);
+        let counter = Counter::new();
+        let events = dispatch_hippocampus(&input, &counter);
+        assert_eq!(events.len(), 1);
+        assert!(close(events[0].new_value, 0.0));
+        assert!(events[0].caps_applied.contains(&Cap::RangeClamp));
+    }
+
+    #[test]
+    fn dispatch_hippocampus_disabled_propagates() {
+        let mut input = hc_input(HippocampusReason::Written);
+        input.enabled = false;
+        let counter = Counter::new();
+        let events = dispatch_hippocampus(&input, &counter);
+        for ev in &events {
+            assert!(ev.disabled);
+        }
+    }
+
+    #[test]
+    fn dispatch_hippocampus_evidence_shape() {
+        let input = hc_input(HippocampusReason::Deleted);
+        let counter = Counter::new();
+        let events = dispatch_hippocampus(&input, &counter);
+        let ev = &events[0];
+        assert_eq!(ev.evidence_json["tool_name"], "hippocampus_deleted");
+        assert_eq!(ev.evidence_json["filename"], "test.org");
+    }
+
+    #[test]
+    fn dispatch_hippocampus_seqs_monotonic() {
+        let input = hc_input(HippocampusReason::Overwritten);
+        let counter = Counter::new();
+        let events = dispatch_hippocampus(&input, &counter);
+        let seqs: Vec<i32> = events.iter().map(|e| e.seq).collect();
+        for w in seqs.windows(2) {
+            assert!(w[1] > w[0]);
+        }
+    }
+
+    #[test]
+    fn dispatch_hippocampus_trace_marked_affects_curiosity_and_brooding() {
+        let mut input = hc_input(HippocampusReason::TraceMarked);
+        input.projection.insert(AttributeName::Curiosity, 0.50);
+        input.projection.insert(AttributeName::Brooding, 0.50);
+        let counter = Counter::new();
+        let events = dispatch_hippocampus(&input, &counter);
+        assert_eq!(events.len(), 2);
+        let names: Vec<_> = events.iter().map(|e| e.name).collect();
+        assert!(names.contains(&AttributeName::Curiosity));
+        assert!(names.contains(&AttributeName::Brooding));
+        let curiosity = events
+            .iter()
+            .find(|e| e.name == AttributeName::Curiosity)
+            .unwrap();
+        assert!(close(curiosity.delta(), -0.05));
+        let brooding = events
+            .iter()
+            .find(|e| e.name == AttributeName::Brooding)
+            .unwrap();
+        assert!(close(brooding.delta(), -0.025));
+    }
+
+    // --- Sensor dispatch (§6S) ---
+
+    fn sensor_input(reason: SensorReason) -> SensorInput {
+        SensorInput {
+            run_id: "r1".into(),
+            ts: Utc::now(),
+            reason,
+            sensor_type: "test".into(),
+            metric_value: 5.0,
+            metric_unit: "test_units".into(),
+            enabled: true,
+            snapshot: Snapshot::default(),
+            projection: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn sensor_base_deltas_match_contract() {
+        // curiosity, friction, shame, doubt, hunger, suspicion, brooding, metamorphosis
+        assert_eq!(
+            sensor_base_deltas(SensorReason::SegmentBacklog),
+            [0.05, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        );
+        assert_eq!(
+            sensor_base_deltas(SensorReason::TypingActive),
+            [0.0, 0.0, 0.0, 0.0, 0.05, 0.0, 0.0, 0.0]
+        );
+        assert_eq!(
+            sensor_base_deltas(SensorReason::TypingIdle),
+            [0.0, 0.0, 0.0, 0.0, 0.025, 0.0, 0.0, 0.0]
+        );
+    }
+
+    #[test]
+    fn dispatch_sensor_segment_backlog_affects_only_curiosity() {
+        let mut input = sensor_input(SensorReason::SegmentBacklog);
+        input.sensor_type = "panopticon_backlog".into();
+        input.metric_unit = "unprocessed_segments".into();
+        input.projection.insert(AttributeName::Curiosity, 0.20);
+        let counter = Counter::new();
+        let events = dispatch_sensor(&input, &counter);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].name, AttributeName::Curiosity);
+        assert!(close(events[0].delta(), 0.05));
+        assert_eq!(events[0].source, "sensor");
+        assert_eq!(events[0].reason, "segment_backlog");
+    }
+
+    #[test]
+    fn dispatch_sensor_typing_active_affects_only_hunger() {
+        let mut input = sensor_input(SensorReason::TypingActive);
+        input.sensor_type = "wpm_activity".into();
+        input.metric_unit = "active_seconds".into();
+        let counter = Counter::new();
+        let events = dispatch_sensor(&input, &counter);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].name, AttributeName::Hunger);
+        assert!(close(events[0].delta(), 0.05));
+    }
+
+    #[test]
+    fn dispatch_sensor_typing_idle_affects_only_hunger() {
+        let input = sensor_input(SensorReason::TypingIdle);
+        let counter = Counter::new();
+        let events = dispatch_sensor(&input, &counter);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].name, AttributeName::Hunger);
+        assert!(close(events[0].delta(), 0.025));
+    }
+
+    #[test]
+    fn dispatch_sensor_evidence_shape() {
+        let mut input = sensor_input(SensorReason::SegmentBacklog);
+        input.sensor_type = "panopticon_backlog".into();
+        input.metric_value = 7.0;
+        input.metric_unit = "unprocessed_segments".into();
+        let counter = Counter::new();
+        let events = dispatch_sensor(&input, &counter);
+        let ev = &events[0];
+        assert_eq!(ev.evidence_json["sensor_type"], "panopticon_backlog");
+        assert!(close(
+            ev.evidence_json["metric_value"].as_f64().unwrap(),
+            7.0
+        ));
+        assert_eq!(ev.evidence_json["metric_unit"], "unprocessed_segments");
+    }
+
+    #[test]
+    fn dispatch_sensor_disabled_propagates() {
+        let mut input = sensor_input(SensorReason::SegmentBacklog);
+        input.enabled = false;
+        let counter = Counter::new();
+        let events = dispatch_sensor(&input, &counter);
+        for ev in &events {
+            assert!(ev.disabled);
+        }
+    }
+
+    #[test]
+    fn dispatch_sensor_range_clamp_applies() {
+        let mut input = sensor_input(SensorReason::SegmentBacklog);
+        input.projection.insert(AttributeName::Curiosity, 0.98);
+        let counter = Counter::new();
+        let events = dispatch_sensor(&input, &counter);
+        assert_eq!(events.len(), 1);
+        assert!(close(events[0].new_value, 1.0));
+        assert!(events[0].caps_applied.contains(&Cap::RangeClamp));
     }
 }

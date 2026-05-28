@@ -421,9 +421,11 @@ async fn rebuild_replays_events_in_ts_run_seq_order() {
         .bind(0.10_f64)
         .bind("outcome")
         .bind("ignored")
-        .bind(sqlx::types::Json(json!({"intervention_id": format!("{run_id}.iv001"),
+        .bind(sqlx::types::Json(
+            json!({"intervention_id": format!("{run_id}.iv001"),
                                        "classification": "ignored",
-                                       "confidence": "medium"})))
+                                       "confidence": "medium"}),
+        ))
         .bind(sqlx::types::Json(json!([])))
         .bind(false)
         .execute(&pool)
@@ -446,9 +448,11 @@ async fn rebuild_replays_events_in_ts_run_seq_order() {
     .bind(0.15_f64)
     .bind("outcome")
     .bind("contradicted")
-    .bind(sqlx::types::Json(json!({"intervention_id": format!("{run_id}.iv002"),
+    .bind(sqlx::types::Json(
+        json!({"intervention_id": format!("{run_id}.iv002"),
                                    "classification": "contradicted",
-                                   "confidence": "medium"})))
+                                   "confidence": "medium"}),
+    ))
     .bind(sqlx::types::Json(json!([])))
     .bind(false)
     .execute(&pool)
@@ -481,7 +485,16 @@ async fn rebuild_default_skips_disabled_events() {
 
     // Event 1: live, sets to 0.20.
     insert_raw_event(
-        &pool, &run_id, 1, base, &scope, "doubt", 0.0, 0.20, "outcome", "ignored",
+        &pool,
+        &run_id,
+        1,
+        base,
+        &scope,
+        "doubt",
+        0.0,
+        0.20,
+        "outcome",
+        "ignored",
         &format!("{run_id}.iv001"),
         "ignored",
         "medium",

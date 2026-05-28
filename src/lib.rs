@@ -14,19 +14,23 @@ pub mod pool;
 pub mod rpc;
 pub mod run_loop;
 pub mod store;
+pub mod tuning;
 pub mod types;
 
 pub use dispatcher::{
-    AttributePlan, Confidence, CueDimensions, OutcomeInput, RevisionInput, Snapshot,
-    affected, base_deltas, dispatch_outcome, dispatch_revision, gather_prior_actuals,
-    plan_for, weight_delta, ATTR_ORDER,
+    ATTR_ORDER, AttributePlan, Confidence, CueDimensions, HippocampusInput, OutcomeInput,
+    RevisionInput, SensorInput, Snapshot, affected, base_deltas, dispatch_hippocampus,
+    dispatch_outcome, dispatch_revision, dispatch_sensor, gather_prior_actuals,
+    hippocampus_base_deltas, plan_for, sensor_base_deltas, weight_delta,
 };
 pub use error::{Error, Result};
 pub use store::{
-    AttributeRow, Counter, EventInsert, EventRow, format_event_id, insert_event,
-    lookup_attribute, lookup_prior_events_by_intervention, outcome_evidence_json,
-    rebuild_projection, upsert_attribute,
+    AttributeRow, Counter, EventInsert, EventRow, format_event_id, insert_event, lookup_attribute,
+    lookup_prior_events_by_intervention, outcome_evidence_json, rebuild_projection,
+    upsert_attribute,
 };
-pub use types::{AttributeName, Cap, OutcomeReason, Scope, Source};
+pub use types::{
+    AttributeName, Cap, HippocampusReason, OutcomeReason, Scope, SensorReason, Source,
+};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

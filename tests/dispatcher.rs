@@ -21,10 +21,9 @@ use chrono::{Duration, Utc};
 use serde_json::json;
 
 use satan_attrd::{
-    AttributeName, ATTR_ORDER, Cap, Confidence, Counter, CueDimensions, EventInsert,
-    OutcomeInput, OutcomeReason, RevisionInput, Scope, Snapshot, base_deltas,
-    dispatch_outcome, dispatch_revision, gather_prior_actuals, insert_event, plan_for,
-    weight_delta,
+    ATTR_ORDER, AttributeName, Cap, Confidence, Counter, CueDimensions, EventInsert, OutcomeInput,
+    OutcomeReason, RevisionInput, Scope, Snapshot, base_deltas, dispatch_outcome,
+    dispatch_revision, gather_prior_actuals, insert_event, plan_for, weight_delta,
 };
 
 // ---------------------------------------------------------------------------
@@ -157,7 +156,10 @@ async fn harmful_snapshot_freezes_friction_cap_inputs() {
     // friction is -0.30 anyway (cap doesn't fire on negative), so the
     // assertion is the simpler "no friction_cap appears".
     let mut inp = input(&run_id, &iv_id, OutcomeReason::Harmful, Confidence::Medium);
-    inp.snapshot = Snapshot { doubt: 0.0, shame: 0.0 };
+    inp.snapshot = Snapshot {
+        doubt: 0.0,
+        shame: 0.0,
+    };
     inp.projection.insert(AttributeName::Friction, 0.60);
     inp.projection.insert(AttributeName::Shame, 0.10);
     inp.projection.insert(AttributeName::Doubt, 0.10);
@@ -251,7 +253,12 @@ async fn disabled_emit_writes_event_row_with_disabled_true() {
     let run_id = common::unique_run_id();
     let iv_id = format!("{run_id}.iv001");
 
-    let mut inp = input(&run_id, &iv_id, OutcomeReason::Contradicted, Confidence::Medium);
+    let mut inp = input(
+        &run_id,
+        &iv_id,
+        OutcomeReason::Contradicted,
+        Confidence::Medium,
+    );
     inp.enabled = false; // broker switch off
     inp.projection.insert(AttributeName::Shame, 0.30);
     inp.projection.insert(AttributeName::Doubt, 0.30);
@@ -320,11 +327,19 @@ async fn revision_uses_actually_logged_prior_delta() {
         .await
         .unwrap();
     let actual = priors.get(&AttributeName::Shame).copied().unwrap();
-    assert!(close(actual, 0.02), "expected actual prior +0.02, got {actual}");
+    assert!(
+        close(actual, 0.02),
+        "expected actual prior +0.02, got {actual}"
+    );
 
     // 3. Revise (ignored, medium) → (contradicted, medium). New theoretical
     //    for shame = +0.15. Revision delta = 0.15 - 0.02 = +0.13.
-    let mut base = input(&run_id, &iv_id, OutcomeReason::Contradicted, Confidence::Medium);
+    let mut base = input(
+        &run_id,
+        &iv_id,
+        OutcomeReason::Contradicted,
+        Confidence::Medium,
+    );
     // Seed a non-extreme projection so cap doesn't dominate the assertion.
     base.projection.insert(AttributeName::Shame, 0.50);
     base.projection.insert(AttributeName::Doubt, 0.30);
@@ -474,7 +489,10 @@ async fn friction_cap_via_direct_store_helper() {
 
     // Synthesised positive friction delta — would never arise from §6
     // outcomes but exercises the cap path the schema reserves.
-    let snap = Snapshot { doubt: 0.40, shame: 0.40 };
+    let snap = Snapshot {
+        doubt: 0.40,
+        shame: 0.40,
+    };
     let plan = plan_for(AttributeName::Friction, 0.25, 0.10, snap);
     assert!(plan.caps_applied.contains(&Cap::FrictionCap));
     assert!(close(plan.new_value, 0.20)); // bound = 1 - 0.4 - 0.4 = 0.20

@@ -18,14 +18,15 @@ use sqlx::types::Json;
 use tokio::select;
 
 use crate::dispatcher::{
-    self, ATTR_ORDER, Confidence, CueDimensions, OutcomeInput, RevisionInput, Snapshot,
+    self, ATTR_ORDER, Confidence, CueDimensions, HippocampusInput, OutcomeInput, RevisionInput,
+    SensorInput, Snapshot,
 };
 use crate::error::{Error, Result};
 use crate::rpc;
 use crate::store::{self, Counter, EventInsert};
-use crate::types::{AttributeName, OutcomeReason};
 #[cfg(test)]
 use crate::types::Scope;
+use crate::types::{AttributeName, HippocampusReason, OutcomeReason, SensorReason};
 
 // ---------------------------------------------------------------------------
 // Per-run Counter LRU (contract §17.7)
@@ -71,10 +72,11 @@ impl LruCounterMap {
                     "LRU-evicted per-run Counter (§17.7)"
                 );
             }
-            self.map.insert(run_id.to_string(), Counter::new());
             self.order.push_back(run_id.to_string());
         }
-        self.map.get(run_id).expect("just inserted/touched")
+        self.map
+            .entry(run_id.to_string())
+            .or_insert_with(Counter::new)
     }
 
     #[must_use]
@@ -85,6 +87,26 @@ impl LruCounterMap {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.map.is_empty()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Source routing
+// ---------------------------------------------------------------------------
+
+enum InboxPayload {
+    Outcome(OutcomePayload),
+    Hippocampus(HippocampusPayload),
+    Sensor(SensorPayload),
+}
+
+fn parse_inbox_payload(v: &Value) -> std::result::Result<InboxPayload, String> {
+    let source = v.get("source").and_then(Value::as_str).unwrap_or("outcome");
+    match source {
+        "outcome" => parse_outcome_payload(v).map(InboxPayload::Outcome),
+        "hippocampus" => parse_hippocampus_payload(v).map(InboxPayload::Hippocampus),
+        "sensor" => parse_sensor_payload(v).map(InboxPayload::Sensor),
+        other => Err(format!("unknown source: {other}")),
     }
 }
 
@@ -106,7 +128,9 @@ struct OutcomePayload {
 }
 
 fn parse_outcome_payload(v: &Value) -> std::result::Result<OutcomePayload, String> {
-    let obj = v.as_object().ok_or_else(|| "payload must be object".to_string())?;
+    let obj = v
+        .as_object()
+        .ok_or_else(|| "payload must be object".to_string())?;
     let get_str = |key: &str| -> std::result::Result<String, String> {
         obj.get(key)
             .and_then(Value::as_str)
@@ -124,8 +148,7 @@ fn parse_outcome_payload(v: &Value) -> std::result::Result<OutcomePayload, Strin
         .parse::<OutcomeReason>()
         .map_err(|e| format!("classification: {e}"))?;
     let confidence_str = get_str("confidence")?;
-    let confidence =
-        Confidence::parse(&confidence_str).map_err(|e| format!("confidence: {e}"))?;
+    let confidence = Confidence::parse(&confidence_str).map_err(|e| format!("confidence: {e}"))?;
 
     let evidence = obj
         .get("evidence")
@@ -136,9 +159,13 @@ fn parse_outcome_payload(v: &Value) -> std::result::Result<OutcomePayload, Strin
         .get("is_revision")
         .and_then(Value::as_bool)
         .ok_or_else(|| "missing or non-bool is_revision".to_string())?;
-    let revises = obj
-        .get("revises")
-        .and_then(|x| if x.is_null() { None } else { x.as_str().map(str::to_string) });
+    let revises = obj.get("revises").and_then(|x| {
+        if x.is_null() {
+            None
+        } else {
+            x.as_str().map(str::to_string)
+        }
+    });
     let enabled = obj
         .get("enabled")
         .and_then(Value::as_bool)
@@ -165,12 +192,20 @@ fn parse_cue(evidence: &Value) -> std::result::Result<CueDimensions, String> {
     let obj = evidence
         .as_object()
         .ok_or_else(|| "evidence must be object".to_string())?;
-    let intervention_kind = obj
-        .get("intervention_kind")
-        .and_then(|v| if v.is_null() { None } else { v.as_str().map(str::to_string) });
-    let related_motive_id = obj
-        .get("related_motive_id")
-        .and_then(|v| if v.is_null() { None } else { v.as_str().map(str::to_string) });
+    let intervention_kind = obj.get("intervention_kind").and_then(|v| {
+        if v.is_null() {
+            None
+        } else {
+            v.as_str().map(str::to_string)
+        }
+    });
+    let related_motive_id = obj.get("related_motive_id").and_then(|v| {
+        if v.is_null() {
+            None
+        } else {
+            v.as_str().map(str::to_string)
+        }
+    });
     let cue_handles = obj
         .get("cue_handles")
         .and_then(Value::as_array)
@@ -198,17 +233,120 @@ fn parse_cue(evidence: &Value) -> std::result::Result<CueDimensions, String> {
 }
 
 // ---------------------------------------------------------------------------
+// Parsed broker → daemon hippocampus payload (§6H.6)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+struct HippocampusPayload {
+    run_id: String,
+    ts: DateTime<Utc>,
+    reason: HippocampusReason,
+    tool_name: String,
+    filename: String,
+    enabled: bool,
+}
+
+fn parse_hippocampus_payload(v: &Value) -> std::result::Result<HippocampusPayload, String> {
+    let obj = v
+        .as_object()
+        .ok_or_else(|| "payload must be object".to_string())?;
+    let get_str = |key: &str| -> std::result::Result<String, String> {
+        obj.get(key)
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| format!("missing or non-string field: {key}"))
+    };
+    let run_id = get_str("run_id")?;
+    let ts_str = get_str("ts")?;
+    let ts: DateTime<Utc> = ts_str
+        .parse::<DateTime<Utc>>()
+        .map_err(|e| format!("ts parse failed: {e}"))?;
+    let reason_str = get_str("reason")?;
+    let reason = reason_str
+        .parse::<HippocampusReason>()
+        .map_err(|e| format!("reason: {e}"))?;
+    let tool_name = get_str("tool_name")?;
+    let filename = get_str("filename")?;
+    let enabled = obj
+        .get("enabled")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| "missing or non-bool enabled".to_string())?;
+
+    Ok(HippocampusPayload {
+        run_id,
+        ts,
+        reason,
+        tool_name,
+        filename,
+        enabled,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Parsed broker → daemon sensor payload (§6S)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+struct SensorPayload {
+    run_id: String,
+    ts: DateTime<Utc>,
+    reason: SensorReason,
+    sensor_type: String,
+    metric_value: f64,
+    metric_unit: String,
+    enabled: bool,
+}
+
+fn parse_sensor_payload(v: &Value) -> std::result::Result<SensorPayload, String> {
+    let obj = v
+        .as_object()
+        .ok_or_else(|| "payload must be object".to_string())?;
+    let get_str = |key: &str| -> std::result::Result<String, String> {
+        obj.get(key)
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| format!("missing or non-string field: {key}"))
+    };
+    let run_id = get_str("run_id")?;
+    let ts_str = get_str("ts")?;
+    let ts: DateTime<Utc> = ts_str
+        .parse::<DateTime<Utc>>()
+        .map_err(|e| format!("ts parse failed: {e}"))?;
+    let reason_str = get_str("reason")?;
+    let reason = reason_str
+        .parse::<SensorReason>()
+        .map_err(|e| format!("reason: {e}"))?;
+    let sensor_type = get_str("sensor_type")?;
+    let metric_value = obj
+        .get("metric_value")
+        .and_then(Value::as_f64)
+        .ok_or_else(|| "missing or non-number metric_value".to_string())?;
+    let metric_unit = get_str("metric_unit")?;
+    let enabled = obj
+        .get("enabled")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| "missing or non-bool enabled".to_string())?;
+
+    Ok(SensorPayload {
+        run_id,
+        ts,
+        reason,
+        sensor_type,
+        metric_value,
+        metric_unit,
+        enabled,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Snapshot + projection read
 // ---------------------------------------------------------------------------
 
-async fn read_projection(
-    pool: &PgPool,
-) -> Result<(Snapshot, HashMap<AttributeName, f64>)> {
-    let rows: Vec<(String, f64)> = sqlx::query_as(
-        "SELECT name, value FROM satan_attributes WHERE scope = 'global'",
-    )
-    .fetch_all(pool)
-    .await?;
+async fn read_projection(pool: &PgPool) -> Result<(Snapshot, HashMap<AttributeName, f64>)> {
+    let rows: Vec<(String, f64)> =
+        sqlx::query_as("SELECT name, value FROM satan_attributes WHERE scope = 'global'")
+            .fetch_all(pool)
+            .await?;
 
     let mut proj: HashMap<AttributeName, f64> = HashMap::with_capacity(8);
     let mut doubt = 0.0;
@@ -382,8 +520,8 @@ impl RunLoop {
             return Ok(());
         }
 
-        let outcome = match parse_outcome_payload(&payload) {
-            Ok(o) => o,
+        let parsed = match parse_inbox_payload(&payload) {
+            Ok(p) => p,
             Err(e) => {
                 tracing::error!(error = %e, id, "outcome inbox: parse failed");
                 self.delete_outcome_row(id).await?;
@@ -393,22 +531,56 @@ impl RunLoop {
 
         let (snapshot, projection) = read_projection(&self.pool).await?;
 
-        let events = if outcome.is_revision {
-            self.build_revision_events(&outcome, snapshot, projection).await?
-        } else {
-            let input = OutcomeInput {
-                run_id: outcome.run_id.clone(),
-                ts: outcome.ts,
-                intervention_id: outcome.intervention_id.clone(),
-                classification: outcome.classification,
-                confidence: outcome.confidence,
-                cue: outcome.cue.clone(),
-                enabled: outcome.enabled,
-                snapshot,
-                projection,
-            };
-            let counter = self.counters.get_or_create(&outcome.run_id);
-            dispatcher::dispatch_outcome(&input, counter)
+        let events = match parsed {
+            InboxPayload::Outcome(outcome) => {
+                if outcome.is_revision {
+                    self.build_revision_events(&outcome, snapshot, projection)
+                        .await?
+                } else {
+                    let input = OutcomeInput {
+                        run_id: outcome.run_id.clone(),
+                        ts: outcome.ts,
+                        intervention_id: outcome.intervention_id.clone(),
+                        classification: outcome.classification,
+                        confidence: outcome.confidence,
+                        cue: outcome.cue.clone(),
+                        enabled: outcome.enabled,
+                        snapshot,
+                        projection,
+                    };
+                    let counter = self.counters.get_or_create(&outcome.run_id);
+                    dispatcher::dispatch_outcome(&input, counter)
+                }
+            }
+            InboxPayload::Hippocampus(hc) => {
+                let input = HippocampusInput {
+                    run_id: hc.run_id.clone(),
+                    ts: hc.ts,
+                    reason: hc.reason,
+                    tool_name: hc.tool_name.clone(),
+                    filename: hc.filename.clone(),
+                    enabled: hc.enabled,
+                    snapshot,
+                    projection,
+                };
+                let counter = self.counters.get_or_create(&hc.run_id);
+                dispatcher::dispatch_hippocampus(&input, counter)
+            }
+            InboxPayload::Sensor(s) => {
+                let input = SensorInput {
+                    run_id: s.run_id.clone(),
+                    ts: s.ts,
+                    reason: s.reason,
+                    sensor_type: s.sensor_type.clone(),
+                    metric_value: s.metric_value,
+                    metric_unit: s.metric_unit.clone(),
+                    enabled: s.enabled,
+                    snapshot,
+                    projection,
+                };
+                let counter = self.counters.get_or_create(&s.run_id);
+                dispatcher::dispatch_sensor(&input, counter)
+            }
         };
 
         for ev in &events {
@@ -442,7 +614,9 @@ impl RunLoop {
             .revises
             .clone()
             .ok_or_else(|| Error::InvalidArgument("is_revision but no revises".into()))?;
-        let prior_classification = self.derive_prior_classification(&outcome.intervention_id).await?;
+        let prior_classification = self
+            .derive_prior_classification(&outcome.intervention_id)
+            .await?;
         let names = union_affected(prior_classification, outcome.classification);
         let prior_actuals =
             dispatcher::gather_prior_actuals(&self.pool, &outcome.intervention_id, &names).await?;
@@ -475,10 +649,7 @@ impl RunLoop {
     /// `prior_classification` to compute the union of affected attributes —
     /// for a chain of revisions the latest revision *is* the "current prior",
     /// matching contract §6.2 step 2's "old + new classifications" semantics.
-    async fn derive_prior_classification(
-        &self,
-        intervention_id: &str,
-    ) -> Result<OutcomeReason> {
+    async fn derive_prior_classification(&self, intervention_id: &str) -> Result<OutcomeReason> {
         let row: Option<(String,)> = sqlx::query_as(
             "SELECT reason
                FROM satan_attribute_events
@@ -506,12 +677,11 @@ impl RunLoop {
     }
 
     async fn process_reply_row(&mut self, inbox_id: i32) -> Result<()> {
-        let row: Option<(String,)> = sqlx::query_as(
-            "SELECT error_msg FROM satan_audit_replies WHERE inbox_id = $1",
-        )
-        .bind(inbox_id)
-        .fetch_optional(&self.pool)
-        .await?;
+        let row: Option<(String,)> =
+            sqlx::query_as("SELECT error_msg FROM satan_audit_replies WHERE inbox_id = $1")
+                .bind(inbox_id)
+                .fetch_optional(&self.pool)
+                .await?;
         if let Some((msg,)) = row {
             tracing::error!(
                 inbox_id,
