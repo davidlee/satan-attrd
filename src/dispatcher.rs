@@ -858,7 +858,7 @@ mod tests {
         );
         assert_eq!(
             hippocampus_base_deltas(HippocampusReason::TraceMarked),
-            [-0.05, 0.0, 0.0, 0.0, 0.0, 0.0, -0.025, 0.0]
+            [-0.025, 0.0, 0.0, 0.0, 0.0, 0.0, -0.025, 0.0]
         );
     }
 
@@ -973,7 +973,7 @@ mod tests {
             .iter()
             .find(|e| e.name == AttributeName::Curiosity)
             .unwrap();
-        assert!(close(curiosity.delta(), -0.05));
+        assert!(close(curiosity.delta(), -0.025));
         let brooding = events
             .iter()
             .find(|e| e.name == AttributeName::Brooding)

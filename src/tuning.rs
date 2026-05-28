@@ -87,7 +87,7 @@ pub const fn hippocampus_base_deltas(reason: HippocampusReason) -> [f64; 8] {
         HippocampusReason::Deleted => [0.0, 0.0, -TINY, 0.0, 0.0, 0.0, -TINY, 0.0],
         HippocampusReason::Renamed => [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -TINY, 0.0],
         HippocampusReason::Searched => [0.0, 0.0, 0.0, 0.0, 0.0, TINY, 0.0, 0.0],
-        HippocampusReason::TraceMarked => [-SMALL, 0.0, 0.0, 0.0, 0.0, 0.0, -TINY, 0.0],
+        HippocampusReason::TraceMarked => [-TINY, 0.0, 0.0, 0.0, 0.0, 0.0, -TINY, 0.0],
     }
 }
 
