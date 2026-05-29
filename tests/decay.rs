@@ -18,7 +18,7 @@ use chrono::{Duration as ChronoDuration, SubsecRound, Utc};
 use serde_json::json;
 use tokio::sync::Mutex;
 
-use satan_attrd::{AttributeName, DECAY_TARGETS, DecayScheduler, FakeClock, Scope};
+use satan_attrd::{AttributeName, DECAY_TARGETS, DecayScheduler, FakeClock, Scope, store};
 
 /// Serialises tests that mutate the four `DECAY_TARGETS` rows at
 /// `scope = 'global'`. Parallel `tick_*` tests would race each other's
@@ -42,6 +42,37 @@ async fn set_last_decay_at(
     .execute(pool)
     .await
     .unwrap();
+}
+
+/// Force a global decay-target row to a known `(value, last_decay_at)`.
+/// `last = None` writes SQL NULL (the "decay never ran" state).
+async fn force_target(
+    pool: &sqlx::PgPool,
+    name: &str,
+    value: f64,
+    last: Option<chrono::DateTime<Utc>>,
+) {
+    sqlx::query(
+        "UPDATE satan_attributes
+         SET value = $1, last_decay_at = $2, evidence_json = '{}'::jsonb
+         WHERE scope = 'global' AND name = $3",
+    )
+    .bind(value)
+    .bind(last)
+    .bind(name)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+/// Pin the decay disable-switch to enabled at the start of a tick test, so a
+/// predecessor that panicked before resetting it cannot leak `false` into a
+/// test that assumes the enabled path. (The setting is shared DB state; the
+/// `DECAY_TEST_LOCK` serialises tick tests but does not roll back on panic.)
+async fn enable_attribute_updates(pool: &sqlx::PgPool) {
+    store::set_setting_bool(pool, "attribute_updates_enabled", true)
+        .await
+        .unwrap();
 }
 
 async fn fetch_state(
@@ -111,7 +142,12 @@ async fn check_due_returns_rows_older_than_24h() {
     let due = scheduler.check_due().await.unwrap();
     assert_eq!(due.len(), DECAY_TARGETS.len());
     for row in &due {
-        assert_eq!(row.days_since_last, Some(1), "{}: 25h is 1 whole day", row.name);
+        assert_eq!(
+            row.days_since_last,
+            Some(1),
+            "{}: 25h is 1 whole day",
+            row.name
+        );
     }
 
     common::cleanup_scope(&pool, &scope).await;
@@ -213,7 +249,14 @@ async fn check_due_handles_mixed_freshness() {
 // T-attr-2d apply-side: tick fires (golden + floor)
 // ---------------------------------------------------------------------------
 
-async fn snapshot_decay_targets_global(pool: &sqlx::PgPool) -> Vec<(String, f64, Option<chrono::DateTime<Utc>>, serde_json::Value)> {
+async fn snapshot_decay_targets_global(
+    pool: &sqlx::PgPool,
+) -> Vec<(
+    String,
+    f64,
+    Option<chrono::DateTime<Utc>>,
+    serde_json::Value,
+)> {
     let names: Vec<&'static str> = DECAY_TARGETS.iter().map(|n| n.as_str()).collect();
     sqlx::query_as(
         "SELECT name, value, last_decay_at, evidence_json
@@ -228,7 +271,12 @@ async fn snapshot_decay_targets_global(pool: &sqlx::PgPool) -> Vec<(String, f64,
 
 async fn restore_decay_targets_global(
     pool: &sqlx::PgPool,
-    rows: &[(String, f64, Option<chrono::DateTime<Utc>>, serde_json::Value)],
+    rows: &[(
+        String,
+        f64,
+        Option<chrono::DateTime<Utc>>,
+        serde_json::Value,
+    )],
 ) {
     for (name, value, last_decay_at, evidence_json) in rows {
         sqlx::query(
@@ -265,6 +313,7 @@ async fn tick_applies_decay_and_bumps_last_decay_at() {
     let _lock = DECAY_TEST_LOCK.lock().await;
     let pool = common::shared_pool().await;
     let snapshot = snapshot_decay_targets_global(&pool).await;
+    enable_attribute_updates(&pool).await;
 
     // Truncate to microseconds — PG TIMESTAMPTZ stores us-precision; chrono
     // ns-precision values round-trip lossy. Truncating up front keeps the
@@ -352,6 +401,7 @@ async fn tick_clamps_floor_to_zero_with_range_clamp_cap() {
     let _lock = DECAY_TEST_LOCK.lock().await;
     let pool = common::shared_pool().await;
     let snapshot = snapshot_decay_targets_global(&pool).await;
+    enable_attribute_updates(&pool).await;
 
     let now = Utc::now().trunc_subsecs(6);
     let stale = now - ChronoDuration::hours(48);
@@ -387,11 +437,7 @@ async fn tick_clamps_floor_to_zero_with_range_clamp_cap() {
     }
 
     let clock = Arc::new(FakeClock::new(now));
-    let scheduler = DecayScheduler::new(
-        pool.clone(),
-        clock,
-        Scope::Global.as_str().to_string(),
-    );
+    let scheduler = DecayScheduler::new(pool.clone(), clock, Scope::Global.as_str().to_string());
     let count = scheduler.tick().await.unwrap();
     assert_eq!(count, 1, "only Shame should be due");
 
@@ -410,6 +456,351 @@ async fn tick_clamps_floor_to_zero_with_range_clamp_cap() {
     .unwrap();
     assert_eq!(caps_json, json!(["range_clamp"]));
 
+    purge_test_decay_events(&pool, &run_id).await;
+    restore_decay_targets_global(&pool, &snapshot).await;
+}
+
+// ---------------------------------------------------------------------------
+// T-attr-2e integration matrix: catch-up, disable, restart, replay-determinism
+// ---------------------------------------------------------------------------
+
+/// §8 / handover:149–154 — a multi-day gap is collapsed into ONE event with a
+/// single -0.01 delta; the gap is preserved in `evidence_json.days_since_last`
+/// for observability, NOT multiplied into the delta.
+#[tokio::test]
+async fn tick_catch_up_emits_single_event_for_multi_day_gap() {
+    let _lock = DECAY_TEST_LOCK.lock().await;
+    let pool = common::shared_pool().await;
+    let snapshot = snapshot_decay_targets_global(&pool).await;
+    enable_attribute_updates(&pool).await;
+
+    let now = Utc::now().trunc_subsecs(6);
+    let stale = now - ChronoDuration::days(5);
+    let run_id = format!("maintenance:{}", now.date_naive().format("%Y-%m-%d"));
+    purge_test_decay_events(&pool, &run_id).await;
+
+    // Only Shame is stale; the others are fresh so the assertion set is just Shame.
+    force_target(&pool, "shame", 0.50, Some(stale)).await;
+    for name in [
+        AttributeName::Doubt,
+        AttributeName::Brooding,
+        AttributeName::Metamorphosis,
+    ] {
+        force_target(&pool, name.as_str(), 0.50, Some(now)).await;
+    }
+
+    let clock = Arc::new(FakeClock::new(now));
+    let scheduler = DecayScheduler::new(pool.clone(), clock, Scope::Global.as_str().to_string());
+    let count = scheduler.tick().await.unwrap();
+    assert_eq!(count, 1, "only the 5-day-stale target should fire");
+
+    let rows: Vec<(f64, f64, serde_json::Value)> = sqlx::query_as(
+        "SELECT old_value, new_value, evidence_json FROM satan_attribute_events
+         WHERE run_id = $1 AND scope = 'global' AND name = 'shame'",
+    )
+    .bind(&run_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        rows.len(),
+        1,
+        "catch-up collapses a multi-day gap into one event"
+    );
+    let (old, new, evidence) = &rows[0];
+    assert!((old - 0.50).abs() < 1e-9);
+    assert!(
+        (new - 0.49).abs() < 1e-9,
+        "single -0.01 delta, not multiplied by the 5-day gap, got {new}"
+    );
+    assert_eq!(
+        evidence["days_since_last"].as_i64(),
+        Some(5),
+        "the gap is preserved in evidence even though the delta is single"
+    );
+
+    let (value, _) = fetch_state(&pool, "global", "shame").await;
+    assert!((value - 0.49).abs() < 1e-9);
+
+    purge_test_decay_events(&pool, &run_id).await;
+    restore_decay_targets_global(&pool, &snapshot).await;
+}
+
+/// §17.5 / §17.8 — when `attribute_updates_enabled` is false a decay tick still
+/// inserts the event (`disabled = true`) and enqueues audit, but does NOT upsert
+/// the projection and does NOT bump `last_decay_at`. The non-bump is load-bearing:
+/// on re-enable the row is still due, so decay resumes on the next tick.
+#[tokio::test]
+async fn tick_disabled_inserts_event_and_audit_but_skips_projection() {
+    let _lock = DECAY_TEST_LOCK.lock().await;
+    let pool = common::shared_pool().await;
+    let snapshot = snapshot_decay_targets_global(&pool).await;
+    enable_attribute_updates(&pool).await;
+
+    let now = Utc::now().trunc_subsecs(6);
+    let stale = now - ChronoDuration::hours(48);
+    let run_id = format!("maintenance:{}", now.date_naive().format("%Y-%m-%d"));
+    purge_test_decay_events(&pool, &run_id).await;
+
+    store::set_setting_bool(&pool, "attribute_updates_enabled", false)
+        .await
+        .unwrap();
+
+    // Only Shame due.
+    force_target(&pool, "shame", 0.50, Some(stale)).await;
+    for name in [
+        AttributeName::Doubt,
+        AttributeName::Brooding,
+        AttributeName::Metamorphosis,
+    ] {
+        force_target(&pool, name.as_str(), 0.50, Some(now)).await;
+    }
+
+    let clock = Arc::new(FakeClock::new(now));
+    let scheduler = DecayScheduler::new(pool.clone(), clock, Scope::Global.as_str().to_string());
+    let count = scheduler.tick().await.unwrap();
+    assert_eq!(count, 1);
+
+    // Event row inserted, flagged disabled.
+    let (disabled,): (bool,) = sqlx::query_as(
+        "SELECT disabled FROM satan_attribute_events
+         WHERE run_id = $1 AND scope = 'global' AND name = 'shame'",
+    )
+    .bind(&run_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(disabled, "disabled tick must mark the event disabled");
+
+    // Audit enqueued regardless of the disable switch.
+    let audit_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM satan_audit_inbox WHERE payload_json->>'id' LIKE $1",
+    )
+    .bind(format!("{run_id}.%"))
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(audit_count, 1, "audit must be enqueued even when disabled");
+
+    // Projection untouched: value unchanged, last_decay_at NOT bumped.
+    let (value, last) = fetch_state(&pool, "global", "shame").await;
+    assert!(
+        (value - 0.50).abs() < 1e-9,
+        "disabled tick must not upsert the projection value, got {value}"
+    );
+    assert_eq!(
+        last,
+        Some(stale),
+        "disabled tick must NOT bump last_decay_at (§17.8)"
+    );
+
+    // Re-enable → next tick fires, proving the non-bump kept the row due.
+    store::set_setting_bool(&pool, "attribute_updates_enabled", true)
+        .await
+        .unwrap();
+    let count2 = scheduler.tick().await.unwrap();
+    assert_eq!(
+        count2, 1,
+        "re-enabled tick must fire because last_decay_at was never bumped"
+    );
+    let (value2, last2) = fetch_state(&pool, "global", "shame").await;
+    assert!(
+        (value2 - 0.49).abs() < 1e-9,
+        "re-enabled tick applies decay"
+    );
+    assert_eq!(last2, Some(now), "re-enabled tick bumps last_decay_at");
+
+    // Teardown: restore the setting before releasing the lock.
+    store::set_setting_bool(&pool, "attribute_updates_enabled", true)
+        .await
+        .unwrap();
+    purge_test_decay_events(&pool, &run_id).await;
+    restore_decay_targets_global(&pool, &snapshot).await;
+}
+
+/// Restart durability — scheduler state lives in the DB (`last_decay_at`), not
+/// the in-memory per-day counter. A fresh scheduler the same UTC day is a no-op
+/// (rows already fresh); the next UTC day re-fires under a new `run_id` where a
+/// counter-from-zero is safe.
+#[tokio::test]
+async fn tick_survives_scheduler_restart_via_last_decay_at() {
+    let _lock = DECAY_TEST_LOCK.lock().await;
+    let pool = common::shared_pool().await;
+    let snapshot = snapshot_decay_targets_global(&pool).await;
+    enable_attribute_updates(&pool).await;
+
+    let day0 = Utc::now().trunc_subsecs(6);
+    let stale = day0 - ChronoDuration::hours(48);
+    let day1 = day0 + ChronoDuration::hours(25); // strictly >24h and a later UTC date
+    let run_id0 = format!("maintenance:{}", day0.date_naive().format("%Y-%m-%d"));
+    let run_id1 = format!("maintenance:{}", day1.date_naive().format("%Y-%m-%d"));
+    purge_test_decay_events(&pool, &run_id0).await;
+    purge_test_decay_events(&pool, &run_id1).await;
+
+    for name in DECAY_TARGETS {
+        force_target(&pool, name.as_str(), 0.50, Some(stale)).await;
+    }
+
+    let clock = Arc::new(FakeClock::new(day0));
+    // Scheduler #1 fires and bumps last_decay_at to day0.
+    {
+        let s1 = DecayScheduler::new(
+            pool.clone(),
+            clock.clone(),
+            Scope::Global.as_str().to_string(),
+        );
+        assert_eq!(s1.tick().await.unwrap(), DECAY_TARGETS.len());
+    } // s1 dropped — its in-memory counter is gone.
+
+    // Scheduler #2: restart, same day. State lives in the DB so nothing is due.
+    let s2 = DecayScheduler::new(
+        pool.clone(),
+        clock.clone(),
+        Scope::Global.as_str().to_string(),
+    );
+    assert_eq!(
+        s2.tick().await.unwrap(),
+        0,
+        "post-restart same-day tick must be a no-op (rows fresh in DB)"
+    );
+
+    // Next UTC day, fresh scheduler → re-fires under a new run_id.
+    clock.set(day1);
+    let s3 = DecayScheduler::new(
+        pool.clone(),
+        clock.clone(),
+        Scope::Global.as_str().to_string(),
+    );
+    assert_eq!(
+        s3.tick().await.unwrap(),
+        DECAY_TARGETS.len(),
+        "next UTC day re-fires after restart"
+    );
+
+    purge_test_decay_events(&pool, &run_id0).await;
+    purge_test_decay_events(&pool, &run_id1).await;
+    restore_decay_targets_global(&pool, &snapshot).await;
+}
+
+/// §10.5 / §17.8 — `rebuild_projection` replays the event log from zero and
+/// resets `last_decay_at` to NULL, which re-arms decay (a rebuilt projection is
+/// treated as "decay never ran"). Replay is deterministic: a second rebuild
+/// reproduces identical values. (Generic disabled-skip / replay-all behaviour is
+/// covered in tests/store.rs; this test asserts only the decay-specific clock
+/// reset + re-arm.)
+#[tokio::test]
+async fn rebuild_clears_last_decay_at_so_decay_rearms() {
+    let _lock = DECAY_TEST_LOCK.lock().await;
+    let pool = common::shared_pool().await;
+    let snapshot = snapshot_decay_targets_global(&pool).await;
+    enable_attribute_updates(&pool).await;
+
+    let now = Utc::now().trunc_subsecs(6);
+    let stale = now - ChronoDuration::hours(48);
+    let run_id = format!("maintenance:{}", now.date_naive().format("%Y-%m-%d"));
+    purge_test_decay_events(&pool, &run_id).await;
+
+    for name in DECAY_TARGETS {
+        force_target(&pool, name.as_str(), 0.50, Some(stale)).await;
+    }
+
+    // Enabled tick bumps last_decay_at to `now` for every target.
+    let clock = Arc::new(FakeClock::new(now));
+    let scheduler = DecayScheduler::new(pool.clone(), clock, Scope::Global.as_str().to_string());
+    assert_eq!(scheduler.tick().await.unwrap(), DECAY_TARGETS.len());
+    for name in DECAY_TARGETS {
+        let (_, last) = fetch_state(&pool, "global", name.as_str()).await;
+        assert_eq!(last, Some(now), "{name}: tick should bump last_decay_at");
+    }
+
+    // Rebuild from the event log: zeros + replays, resetting last_decay_at to NULL.
+    store::rebuild_projection(&pool, false).await.unwrap();
+    let mut values_after_first_rebuild = Vec::new();
+    for name in DECAY_TARGETS {
+        let (value, last) = fetch_state(&pool, "global", name.as_str()).await;
+        assert_eq!(last, None, "{name}: rebuild must clear last_decay_at");
+        values_after_first_rebuild.push(value);
+    }
+
+    // Re-arm: every target is due again because last_decay_at is NULL.
+    let due = scheduler.check_due().await.unwrap();
+    assert_eq!(
+        due.len(),
+        DECAY_TARGETS.len(),
+        "every target must be due again after rebuild clears last_decay_at"
+    );
+
+    // Determinism: a second rebuild reproduces identical values.
+    store::rebuild_projection(&pool, false).await.unwrap();
+    for (name, v0) in DECAY_TARGETS.iter().zip(values_after_first_rebuild) {
+        let (v1, _) = fetch_state(&pool, "global", name.as_str()).await;
+        assert!(
+            (v1 - v0).abs() < 1e-9,
+            "{name}: rebuild must be deterministic ({v0} vs {v1})"
+        );
+    }
+
+    purge_test_decay_events(&pool, &run_id).await;
+    restore_decay_targets_global(&pool, &snapshot).await;
+}
+
+/// PROBE (T-attr-2e finding) — restart while disabled, same UTC day. Disabled
+/// ticks never bump `last_decay_at`, so cold (NULL) targets stay due; after a
+/// restart the per-day counter resets to zero and re-emits seq 1..=N under the
+/// same `run_id`, colliding with `UNIQUE (run_id, seq)`. The collision must be
+/// surfaced loudly (attributed error), never silently corrupt or swallowed.
+/// Structural fix (resume the counter from MAX(seq) on startup) is deferred to
+/// T-attr-2f.
+#[tokio::test]
+async fn tick_restart_while_disabled_same_day_collision() {
+    let _lock = DECAY_TEST_LOCK.lock().await;
+    let pool = common::shared_pool().await;
+    let snapshot = snapshot_decay_targets_global(&pool).await;
+    enable_attribute_updates(&pool).await;
+
+    let now = Utc::now().trunc_subsecs(6);
+    let run_id = format!("maintenance:{}", now.date_naive().format("%Y-%m-%d"));
+    purge_test_decay_events(&pool, &run_id).await;
+
+    store::set_setting_bool(&pool, "attribute_updates_enabled", false)
+        .await
+        .unwrap();
+
+    // Cold targets: NULL last_decay_at → always due; disabled ticks never bump.
+    for name in DECAY_TARGETS {
+        force_target(&pool, name.as_str(), 0.50, None).await;
+    }
+
+    let clock = Arc::new(FakeClock::new(now));
+    // Scheduler #1 inserts seq 1..=N under today's run_id, no bump.
+    {
+        let s1 = DecayScheduler::new(
+            pool.clone(),
+            clock.clone(),
+            Scope::Global.as_str().to_string(),
+        );
+        assert_eq!(s1.tick().await.unwrap(), DECAY_TARGETS.len());
+    } // counter dies with s1.
+
+    // Scheduler #2: restart same day. Counter resets → re-emits the same seqs.
+    let s2 = DecayScheduler::new(
+        pool.clone(),
+        clock.clone(),
+        Scope::Global.as_str().to_string(),
+    );
+    let err = s2
+        .tick()
+        .await
+        .expect_err("restart-while-disabled same day must surface an error, not silently corrupt");
+    assert!(
+        matches!(err, satan_attrd::Error::DecaySeqCollision { .. }),
+        "collision must surface as the attributed loud error, got: {err:?}"
+    );
+
+    // Teardown.
+    store::set_setting_bool(&pool, "attribute_updates_enabled", true)
+        .await
+        .unwrap();
     purge_test_decay_events(&pool, &run_id).await;
     restore_decay_targets_global(&pool, &snapshot).await;
 }
