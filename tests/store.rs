@@ -8,12 +8,20 @@ mod common;
 
 use chrono::{Duration, Utc};
 use serde_json::json;
+use tokio::sync::Mutex;
 
 use satan_attrd::{
     AttributeName, Cap, Counter, EventInsert, Scope, format_event_id, insert_event,
     lookup_attribute, lookup_prior_events_by_intervention, outcome_evidence_json,
     rebuild_projection, upsert_attribute,
 };
+
+// `rebuild_projection` zeros every `satan_attributes` row at the start of
+// its transaction (contract §10.5 from-zero replay). Parallel rebuild tests
+// within this binary would race each other's seeded projections, so this
+// mutex serializes the rebuild tests. (Cross-binary races are out of scope
+// — operator-triggered rebuild is single-process by construction.)
+static REBUILD_LOCK: Mutex<()> = Mutex::const_new(());
 
 // ---------------------------------------------------------------------------
 // Migration + seed
@@ -397,6 +405,7 @@ async fn prior_event_lookup_uses_expression_index() {
 
 #[tokio::test]
 async fn rebuild_replays_events_in_ts_run_seq_order() {
+    let _lock = REBUILD_LOCK.lock().await;
     let pool = common::shared_pool().await;
     let run_id = common::unique_run_id();
     let scope = common::unique_scope();
@@ -477,6 +486,7 @@ async fn rebuild_replays_events_in_ts_run_seq_order() {
 
 #[tokio::test]
 async fn rebuild_default_skips_disabled_events() {
+    let _lock = REBUILD_LOCK.lock().await;
     let pool = common::shared_pool().await;
     let run_id = common::unique_run_id();
     let scope = common::unique_scope();
@@ -539,6 +549,50 @@ async fn rebuild_default_skips_disabled_events() {
     );
 
     common::cleanup_run(&pool, &run_id).await;
+    common::cleanup_scope(&pool, &scope).await;
+}
+
+#[tokio::test]
+async fn rebuild_is_from_zero_when_event_log_is_empty_for_scope() {
+    // Contract §10.5: rebuild MUST zero the projection before replay.
+    // The smoke-purge scenario (handover.local.md 2026-05-29 daemon-pin #2):
+    // operator deletes events from `satan_attribute_events`, then runs
+    // rebuild — projection must collapse to zero for any scope whose
+    // events are gone, NOT remain at the cached pre-purge value.
+    let _lock = REBUILD_LOCK.lock().await;
+    let pool = common::shared_pool().await;
+    let scope = common::unique_scope();
+
+    // Seed the projection at a non-zero value with NO matching events.
+    // (Equivalent to the post-purge state: projection holds a stale
+    // cached value, event log carries nothing for this scope.)
+    common::upsert_raw(
+        &pool,
+        &scope,
+        "shame",
+        0.50,
+        &json!({"intervention_id": "stale.iv001"}),
+    )
+    .await;
+    let (value_before, _) = common::select_raw(&pool, &scope, "shame").await.unwrap();
+    assert!(
+        (value_before - 0.50).abs() < 1e-9,
+        "pre-rebuild value should be the stale 0.50, got {value_before}"
+    );
+
+    rebuild_projection(&pool, false).await.unwrap();
+
+    let (value_after, evidence_after) = common::select_raw(&pool, &scope, "shame").await.unwrap();
+    assert!(
+        value_after.abs() < 1e-9,
+        "rebuild must zero projection rows whose events are absent; got {value_after}"
+    );
+    assert_eq!(
+        evidence_after,
+        json!({}),
+        "rebuild must reset evidence_json on zero-step; got {evidence_after}"
+    );
+
     common::cleanup_scope(&pool, &scope).await;
 }
 

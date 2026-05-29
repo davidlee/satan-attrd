@@ -348,26 +348,53 @@ pub async fn lookup_prior_events_by_intervention(
 // Rebuild
 // ---------------------------------------------------------------------------
 
-/// Replay the event log into `satan_attributes`.
+/// Replay the event log into `satan_attributes` — **from zero**.
 ///
-/// Walks `satan_attribute_events ORDER BY ts, run_id, seq` and UPSERTs the
-/// final `new_value` per `(scope, name)`. `include_disabled=false` (the
-/// default) skips rows with `disabled=true` (contract §10.1); `true` replays
-/// every row (§10.2 — hypothetical post-rollback state).
+/// Wraps the operation in a single transaction:
+///   1. Zero every projection row (`value = 0.0`, `evidence_json = '{}'`).
+///   2. Walk `satan_attribute_events ORDER BY ts, run_id, seq` and UPSERT
+///      the final `new_value` per `(scope, name)`.
 ///
-/// Returns the number of events replayed (post-filter).
+/// `include_disabled=false` (the default) skips rows with `disabled=true`
+/// (contract §10.1); `true` replays every row (§10.2 — hypothetical
+/// post-rollback state). Both modes zero first (contract §10.5).
+///
+/// Rationale (contract §10.5): the projection must be derivable from the
+/// event log alone. Replay-on-top contaminates the result with whatever
+/// projection state pre-existed — including pre-rebuild drift and values
+/// left over from since-purged events. From-zero is the only way to make
+/// `rebuild` idempotent and to make event-log-purge → rebuild yield zero.
+///
+/// Returns the number of events replayed (post-filter). Returns `0` if the
+/// event log was purged — in that case rebuild leaves the projection at
+/// `value = 0.0` for every row (which is the correct derivation from an
+/// empty event log).
 ///
 /// # Errors
 ///
-/// Returns a Sqlx error on database failure.
+/// Returns a Sqlx error on database failure. The transaction rolls back if
+/// any step fails, leaving the prior projection state intact.
 pub async fn rebuild_projection(pool: &PgPool, include_disabled: bool) -> Result<usize> {
+    let mut tx = pool.begin().await?;
+
+    // Step 1 (§10.5): zero every row before replay.
+    sqlx::query(
+        "UPDATE satan_attributes
+         SET value = 0.0,
+             evidence_json = '{}'::jsonb,
+             updated_at = NOW()",
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    // Step 2 (§10.1 / §10.2): walk events in deterministic order, UPSERT.
     let rows: Vec<(String, String, f64, Json<Value>, DateTime<Utc>)> = if include_disabled {
         sqlx::query_as(
             "SELECT scope, name, new_value, evidence_json, ts
              FROM satan_attribute_events
              ORDER BY ts, run_id, seq",
         )
-        .fetch_all(pool)
+        .fetch_all(&mut *tx)
         .await?
     } else {
         sqlx::query_as(
@@ -376,7 +403,7 @@ pub async fn rebuild_projection(pool: &PgPool, include_disabled: bool) -> Result
              WHERE disabled = false
              ORDER BY ts, run_id, seq",
         )
-        .fetch_all(pool)
+        .fetch_all(&mut *tx)
         .await?
     };
 
@@ -395,9 +422,11 @@ pub async fn rebuild_projection(pool: &PgPool, include_disabled: bool) -> Result
         .bind(new_value)
         .bind(ts)
         .bind(&evidence.0)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
     }
+
+    tx.commit().await?;
     Ok(count)
 }
 
