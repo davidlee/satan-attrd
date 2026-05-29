@@ -70,6 +70,11 @@ pub struct AttributeRow {
     pub value: f64,
     pub updated_at: DateTime<Utc>,
     pub evidence_json: Value,
+    /// Idle-decay scheduler guard (contract §17.8). `None` means "decay has
+    /// never run for this row" — fresh post-migration insert or post-rebuild
+    /// reset. `Some(ts)` is the wallclock of the last successful decay tick;
+    /// the scheduler fires when `now - ts ≥ 24h`.
+    pub last_decay_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -242,8 +247,15 @@ pub async fn lookup_attribute(
     scope: Scope,
     name: AttributeName,
 ) -> Result<Option<AttributeRow>> {
-    let row: Option<(String, String, f64, DateTime<Utc>, Json<Value>)> = sqlx::query_as(
-        "SELECT scope, name, value, updated_at, evidence_json
+    let row: Option<(
+        String,
+        String,
+        f64,
+        DateTime<Utc>,
+        Json<Value>,
+        Option<DateTime<Utc>>,
+    )> = sqlx::query_as(
+        "SELECT scope, name, value, updated_at, evidence_json, last_decay_at
          FROM satan_attributes
          WHERE scope = $1 AND name = $2",
     )
@@ -252,15 +264,16 @@ pub async fn lookup_attribute(
     .fetch_optional(pool)
     .await?;
 
-    Ok(
-        row.map(|(scope, name, value, updated_at, ev)| AttributeRow {
+    Ok(row.map(
+        |(scope, name, value, updated_at, ev, last_decay_at)| AttributeRow {
             scope,
             name,
             value,
             updated_at,
             evidence_json: ev.0,
-        }),
-    )
+            last_decay_at,
+        },
+    ))
 }
 
 /// Prior `attribute.delta_applied` events for the same intervention id (any
@@ -377,12 +390,17 @@ pub async fn lookup_prior_events_by_intervention(
 pub async fn rebuild_projection(pool: &PgPool, include_disabled: bool) -> Result<usize> {
     let mut tx = pool.begin().await?;
 
-    // Step 1 (§10.5): zero every row before replay.
+    // Step 1 (§10.5): zero every row before replay. `last_decay_at` resets
+    // to NULL per §17.8 "Catch-up across migration / rebuild" — rebuild is
+    // an operator-triggered reset where the projection must reflect the
+    // event log alone, so the scheduler treats post-rebuild rows as
+    // "decay never ran" and fires on the next hourly check.
     sqlx::query(
         "UPDATE satan_attributes
          SET value = 0.0,
              evidence_json = '{}'::jsonb,
-             updated_at = NOW()",
+             updated_at = NOW(),
+             last_decay_at = NULL",
     )
     .execute(&mut *tx)
     .await?;

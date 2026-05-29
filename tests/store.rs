@@ -559,6 +559,11 @@ async fn rebuild_is_from_zero_when_event_log_is_empty_for_scope() {
     // operator deletes events from `satan_attribute_events`, then runs
     // rebuild — projection must collapse to zero for any scope whose
     // events are gone, NOT remain at the cached pre-purge value.
+    //
+    // §17.8 also pins that the zero-step resets `last_decay_at` to NULL —
+    // the scheduler treats post-rebuild rows as "decay never ran" and
+    // fires on the next hourly check. Asserted below by seeding a
+    // non-NULL pre-state.
     let _lock = REBUILD_LOCK.lock().await;
     let pool = common::shared_pool().await;
     let scope = common::unique_scope();
@@ -574,6 +579,19 @@ async fn rebuild_is_from_zero_when_event_log_is_empty_for_scope() {
         &json!({"intervention_id": "stale.iv001"}),
     )
     .await;
+    // Pin a non-NULL `last_decay_at` so the post-rebuild NULL assertion
+    // proves the zero-step actually cleared it (rather than the row
+    // simply having been inserted with the column's NULL default).
+    sqlx::query(
+        "UPDATE satan_attributes SET last_decay_at = NOW()
+         WHERE scope = $1 AND name = $2",
+    )
+    .bind(&scope)
+    .bind("shame")
+    .execute(&pool)
+    .await
+    .unwrap();
+
     let (value_before, _) = common::select_raw(&pool, &scope, "shame").await.unwrap();
     assert!(
         (value_before - 0.50).abs() < 1e-9,
@@ -591,6 +609,19 @@ async fn rebuild_is_from_zero_when_event_log_is_empty_for_scope() {
         evidence_after,
         json!({}),
         "rebuild must reset evidence_json on zero-step; got {evidence_after}"
+    );
+
+    let last_decay_after: Option<chrono::DateTime<Utc>> = sqlx::query_scalar(
+        "SELECT last_decay_at FROM satan_attributes WHERE scope = $1 AND name = $2",
+    )
+    .bind(&scope)
+    .bind("shame")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(
+        last_decay_after.is_none(),
+        "rebuild must reset last_decay_at to NULL (§17.8); got {last_decay_after:?}"
     );
 
     common::cleanup_scope(&pool, &scope).await;
