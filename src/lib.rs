@@ -6,6 +6,8 @@
 //! RPCs `attribute.delta_applied` audit events back to the broker for
 //! transcript writing.
 
+pub mod clock;
+pub mod decay;
 pub mod dispatcher;
 pub mod error;
 pub mod migrate;
@@ -17,6 +19,8 @@ pub mod store;
 pub mod tuning;
 pub mod types;
 
+pub use clock::{Clock, FakeClock, SystemClock};
+pub use decay::{DECAY_TARGETS, DECAY_TICK_INTERVAL, DecayScheduler, DueRow, decay_threshold};
 pub use dispatcher::{
     ATTR_ORDER, AttributePlan, Confidence, CueDimensions, HippocampusInput, OutcomeInput,
     RevisionInput, SensorInput, Snapshot, affected, base_deltas, dispatch_hippocampus,

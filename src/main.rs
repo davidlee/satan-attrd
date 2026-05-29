@@ -16,7 +16,7 @@ use std::process::ExitCode;
 
 use tracing_subscriber::{EnvFilter, fmt};
 
-use satan_attrd::{migrate, notify_stream, pool, run_loop, store};
+use satan_attrd::{Scope, clock, decay, migrate, notify_stream, pool, run_loop, store};
 
 fn init_tracing() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
@@ -115,7 +115,20 @@ async fn run_rebuild(url: &str, include_disabled: bool) -> satan_attrd::Result<u
 
 async fn run_loop_subcommand(url: &str) -> satan_attrd::Result<()> {
     let pool = pool::create_pool(url).await?;
-    run_loop::RunLoop::new(pool).run().await
+    let scheduler = decay::DecayScheduler::new(
+        pool.clone(),
+        std::sync::Arc::new(clock::SystemClock),
+        Scope::Global.as_str().to_string(),
+    );
+    let run_fut = run_loop::RunLoop::new(pool).run();
+    let scheduler_fut = scheduler.run();
+    // Either future returning terminates the daemon. `scheduler_fut` never
+    // returns under normal operation (T-attr-2c skeleton logs errors and
+    // continues); `run_fut` returns only on a fatal listener error.
+    tokio::select! {
+        r = run_fut => r,
+        r = scheduler_fut => r,
+    }
 }
 
 async fn run_notify_stream(url: &str, channels: &[String]) -> satan_attrd::Result<()> {
