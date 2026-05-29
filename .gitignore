@@ -3,6 +3,7 @@
 /.direnv
 *.log
 
+/supabase/.*
 *.local.md
 
 # editor / agent scratch
