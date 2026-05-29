@@ -27,7 +27,8 @@ use crate::error::{Error, Result};
 use crate::store::{Counter, EventInsert, lookup_prior_events_by_intervention};
 use crate::tuning;
 use crate::types::{
-    AttributeName, Cap, HippocampusReason, OutcomeReason, Scope, SensorReason, Source,
+    AttributeName, Cap, HippocampusReason, MaintenanceReason, OutcomeReason, Scope, SensorReason,
+    Source,
 };
 
 // ---------------------------------------------------------------------------
@@ -416,6 +417,66 @@ pub fn dispatch_sensor(input: &SensorInput, counter: &Counter) -> Vec<EventInser
         });
     }
     out
+}
+
+// ---------------------------------------------------------------------------
+// Maintenance dispatch (contract §17.8 — idle decay)
+// ---------------------------------------------------------------------------
+
+/// Per-tick decay delta for one due attribute row. Matches the §8 design
+/// constant — gap-aware "catch-up" was rejected (one tick, one −0.01,
+/// regardless of `days_since_last`; gap lives in evidence only).
+/// `decay::decay_threshold()` is the staleness *duration* (24h), not the
+/// delta — they live in separate dimensions and are intentionally distinct.
+const DECAY_DELTA: f64 = -0.01;
+
+/// Inputs to a maintenance dispatch (v1: idle decay only). One row per
+/// call — `DecayScheduler::tick` invokes this once per due attribute.
+#[derive(Debug, Clone)]
+pub struct MaintenanceInput {
+    pub run_id: String,
+    pub ts: DateTime<Utc>,
+    pub reason: MaintenanceReason,
+    pub target: AttributeName,
+    pub days_since_last: i64,
+    pub enabled: bool,
+    pub snapshot: Snapshot,
+    pub projection: HashMap<AttributeName, f64>,
+}
+
+/// Maintenance dispatch (§17.8). Returns a single-element `Vec<EventInsert>`
+/// — vec-typed for shape parity with the sister dispatchers, not because
+/// v1 emits multiples. Panics if `input.projection` does not contain
+/// `input.target` (contract violation — caller must seed it).
+#[must_use]
+pub fn dispatch_maintenance(input: &MaintenanceInput, counter: &Counter) -> Vec<EventInsert> {
+    let old_value = input.projection[&input.target];
+    let new_value_raw = old_value + DECAY_DELTA;
+    // Decay delta is negative and values are already ≤ 1.0, so only the
+    // lower clamp can ever fire here.
+    let (new_value, caps_applied) = if new_value_raw < 0.0 {
+        (0.0, vec![Cap::RangeClamp])
+    } else {
+        (new_value_raw, vec![])
+    };
+    let evidence = json!({
+        "days_since_last": input.days_since_last,
+        "tick_utc_day": input.ts.date_naive().format("%Y-%m-%d").to_string(),
+    });
+    vec![EventInsert {
+        run_id: input.run_id.clone(),
+        seq: counter.next(),
+        ts: input.ts,
+        scope: Scope::Global,
+        name: input.target,
+        old_value,
+        new_value,
+        source: Source::Maintenance.as_str().to_string(),
+        reason: input.reason.as_str().to_string(),
+        evidence_json: evidence,
+        caps_applied,
+        disabled: !input.enabled,
+    }]
 }
 
 // ---------------------------------------------------------------------------
@@ -1088,5 +1149,72 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert!(close(events[0].new_value, 1.0));
         assert!(events[0].caps_applied.contains(&Cap::RangeClamp));
+    }
+
+    // --- Maintenance dispatch (§17.8 idle decay) ---
+
+    fn maintenance_input(target: AttributeName, value: f64) -> MaintenanceInput {
+        let mut projection = HashMap::new();
+        projection.insert(target, value);
+        MaintenanceInput {
+            run_id: "r1".into(),
+            ts: Utc::now(),
+            reason: MaintenanceReason::IdleDecay,
+            target,
+            days_since_last: 1,
+            enabled: true,
+            snapshot: Snapshot::default(),
+            projection,
+        }
+    }
+
+    #[test]
+    fn dispatch_maintenance_emits_negative_001_delta() {
+        let input = maintenance_input(AttributeName::Shame, 0.50);
+        let counter = Counter::new();
+        let events = dispatch_maintenance(&input, &counter);
+        assert_eq!(events.len(), 1);
+        let ev = &events[0];
+        assert_eq!(ev.name, AttributeName::Shame);
+        assert!(close(ev.old_value, 0.50));
+        assert!(close(ev.new_value, 0.49));
+        assert!(ev.caps_applied.is_empty());
+        assert_eq!(ev.source, "maintenance");
+        assert_eq!(ev.reason, "idle_decay");
+    }
+
+    #[test]
+    fn dispatch_maintenance_clamps_floor_to_zero() {
+        let input = maintenance_input(AttributeName::Brooding, 0.005);
+        let counter = Counter::new();
+        let events = dispatch_maintenance(&input, &counter);
+        assert_eq!(events.len(), 1);
+        let ev = &events[0];
+        assert!(close(ev.new_value, 0.0));
+        assert_eq!(ev.caps_applied, vec![Cap::RangeClamp]);
+    }
+
+    #[test]
+    fn dispatch_maintenance_when_disabled_marks_event_disabled_true() {
+        let mut input = maintenance_input(AttributeName::Doubt, 0.50);
+        input.enabled = false;
+        let counter = Counter::new();
+        let events = dispatch_maintenance(&input, &counter);
+        assert_eq!(events.len(), 1);
+        assert!(events[0].disabled);
+    }
+
+    #[test]
+    fn dispatch_maintenance_evidence_carries_days_since_last_and_utc_day() {
+        let mut input = maintenance_input(AttributeName::Metamorphosis, 0.50);
+        input.days_since_last = 3;
+        input.ts = DateTime::parse_from_rfc3339("2026-05-29T12:34:56Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let counter = Counter::new();
+        let events = dispatch_maintenance(&input, &counter);
+        let ev = &events[0];
+        assert_eq!(ev.evidence_json["days_since_last"].as_i64().unwrap(), 3);
+        assert_eq!(ev.evidence_json["tick_utc_day"], "2026-05-29");
     }
 }

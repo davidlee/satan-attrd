@@ -22,10 +22,11 @@ pub mod types;
 pub use clock::{Clock, FakeClock, SystemClock};
 pub use decay::{DECAY_TARGETS, DECAY_TICK_INTERVAL, DecayScheduler, DueRow, decay_threshold};
 pub use dispatcher::{
-    ATTR_ORDER, AttributePlan, Confidence, CueDimensions, HippocampusInput, OutcomeInput,
-    RevisionInput, SensorInput, Snapshot, affected, base_deltas, dispatch_hippocampus,
-    dispatch_outcome, dispatch_revision, dispatch_sensor, gather_prior_actuals,
-    hippocampus_base_deltas, plan_for, sensor_base_deltas, weight_delta,
+    ATTR_ORDER, AttributePlan, Confidence, CueDimensions, HippocampusInput, MaintenanceInput,
+    OutcomeInput, RevisionInput, SensorInput, Snapshot, affected, base_deltas,
+    dispatch_hippocampus, dispatch_maintenance, dispatch_outcome, dispatch_revision,
+    dispatch_sensor, gather_prior_actuals, hippocampus_base_deltas, plan_for, sensor_base_deltas,
+    weight_delta,
 };
 pub use error::{Error, Result};
 pub use store::{
