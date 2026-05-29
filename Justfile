@@ -1,4 +1,5 @@
-export DATABASE_URL := "postgres:///satan_memory_test?host=/run/postgresql"
+# export DATABASE_URL := "postgres:///satan_memory_test?host=/run/postgresql"
+export DATABASE_URL := "postgresql://postgres:postgres@127.0.0.1:54322/postgres"
 
 default: check
 
