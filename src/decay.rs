@@ -71,6 +71,12 @@ pub const DECAY_TARGETS: [AttributeName; 4] = [
     AttributeName::Metamorphosis,
 ];
 
+/// The synthetic per-UTC-day run_id for idle-decay events (§4.2). One per
+/// UTC calendar day; `seq` is allocated from the day's `Counter`.
+fn maintenance_run_id(day: NaiveDate) -> String {
+    format!("maintenance:{}", day.format("%Y-%m-%d"))
+}
+
 /// Scheduler check cadence. Hourly bounds restart-jitter to <1h; the
 /// per-row `last_decay_at` 24h guard prevents double-fires across hourly
 /// checks.
@@ -115,10 +121,12 @@ pub struct DecayScheduler<C: Clock> {
 impl<C: Clock + 'static> DecayScheduler<C> {
     #[must_use]
     pub fn new(pool: PgPool, clock: Arc<C>, scope: String) -> Self {
-        // Sentinel day (MIN) guarantees the first tick rotates into a
-        // fresh counter for whatever today is. Avoids snapshotting
+        // Sentinel day (MIN) guarantees the first tick rotates the counter
+        // for whatever today is — resuming it from the persisted MAX(seq)+1
+        // (see acquire_day_counter, §17.8 / T-attr-2f). Avoids snapshotting
         // wall-clock at construction time, which would diverge from
-        // FakeClock-based tests.
+        // FakeClock-based tests, and keeps the resume query off the
+        // construction path (it runs lazily on the first due tick).
         let day_counter_state = Mutex::new(DayCounterState {
             day: NaiveDate::MIN,
             counter: Arc::new(Counter::new()),
@@ -202,22 +210,40 @@ impl<C: Clock + 'static> DecayScheduler<C> {
         Ok(out)
     }
 
-    /// Acquire (or rotate) the per-UTC-day Counter. Brief sync-mutex
-    /// critical section: compare day, swap if rolled, clone the Arc out.
-    /// Never held across `.await`.
-    fn acquire_day_counter(&self, today: NaiveDate) -> Arc<Counter> {
-        // Recover from poisoning: the critical section only compares a date
-        // and swaps an Arc<Counter>, leaving no invariant a panicking holder
-        // could corrupt — reading the inner state beats aborting a tick.
+    /// Acquire (or rotate) the per-UTC-day Counter. On the fast path — still
+    /// the same UTC day — returns the cached counter under a brief lock. On a
+    /// date roll (including the first tick after construction) the counter
+    /// resumes from `MAX(seq)+1` for that day's run_id, so a mid-day daemon
+    /// restart while disabled no longer re-emits persisted `(run_id, seq)`
+    /// pairs (§17.8 / T-attr-2f). The resume query runs before the lock; the
+    /// sync critical section (compare day, swap, clone) is never held across
+    /// `.await`.
+    ///
+    /// Mutex poisoning is recovered, not propagated: the guarded state is a
+    /// date plus an `Arc<Counter>` with no invariant a panicking holder could
+    /// corrupt, so reading the inner value beats aborting a tick.
+    async fn acquire_day_counter(&self, today: NaiveDate) -> Result<Arc<Counter>> {
+        {
+            let guard = self
+                .day_counter_state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if guard.day == today {
+                return Ok(Arc::clone(&guard.counter));
+            }
+        }
+        // Date rolled: resume past any seq a prior process persisted for
+        // today's run_id before re-taking the lock to swap the counter in.
+        let prior_max = store::max_seq_for_run(&self.pool, &maintenance_run_id(today)).await?;
         let mut guard = self
             .day_counter_state
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         if guard.day != today {
             guard.day = today;
-            guard.counter = Arc::new(Counter::new());
+            guard.counter = Arc::new(Counter::resuming_from(prior_max.unwrap_or(0)));
         }
-        Arc::clone(&guard.counter)
+        Ok(Arc::clone(&guard.counter))
     }
 
     /// One scheduler tick. Reads `attribute_updates_enabled`, identifies
@@ -241,7 +267,7 @@ impl<C: Clock + 'static> DecayScheduler<C> {
 
         let now = self.clock.now();
         let today = now.date_naive();
-        let run_id = format!("maintenance:{}", today.format("%Y-%m-%d"));
+        let run_id = maintenance_run_id(today);
 
         let enabled = get_setting_bool(&self.pool, "attribute_updates_enabled", true).await?;
         let projection = self.read_target_values().await?;
@@ -255,7 +281,7 @@ impl<C: Clock + 'static> DecayScheduler<C> {
                 .copied()
                 .unwrap_or(0.0),
         };
-        let counter = self.acquire_day_counter(today);
+        let counter = self.acquire_day_counter(today).await?;
 
         let count = due.len();
         for row in due {

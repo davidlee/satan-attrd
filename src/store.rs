@@ -48,6 +48,18 @@ impl Counter {
         next
     }
 
+    /// Resume a counter past `prior_max`, so the next `next()` returns
+    /// `prior_max + 1`. Lets the decay scheduler rebuild its per-UTC-day seq
+    /// counter from the highest seq already persisted for a `run_id` after a
+    /// daemon restart (§17.8 / T-attr-2f), keeping `(run_id, seq)` unique.
+    /// `resuming_from(0)` is equivalent to `new()`.
+    #[must_use]
+    pub fn resuming_from(prior_max: i32) -> Self {
+        Self {
+            inner: AtomicI32::new(prior_max),
+        }
+    }
+
     /// Current allocated count without incrementing (test helper).
     pub fn peek(&self) -> i32 {
         self.inner.load(Ordering::SeqCst)
@@ -434,6 +446,24 @@ pub async fn bump_last_decay_at(
     Ok(())
 }
 
+/// Highest `seq` already persisted under `run_id`, or `None` when no events
+/// exist for it. The decay scheduler calls this on each UTC-day rollover to
+/// resume its per-day `Counter` past any seq a prior daemon process wrote for
+/// the same `maintenance:<utc-day>` run_id — closing the restart-while-disabled
+/// `(run_id, seq)` collision (§17.8 / T-attr-2f).
+///
+/// # Errors
+///
+/// Returns a Sqlx error on database failure.
+pub async fn max_seq_for_run(pool: &PgPool, run_id: &str) -> Result<Option<i32>> {
+    let max: Option<i32> =
+        sqlx::query_scalar("SELECT MAX(seq) FROM satan_attribute_events WHERE run_id = $1")
+            .bind(run_id)
+            .fetch_one(pool)
+            .await?;
+    Ok(max)
+}
+
 // ---------------------------------------------------------------------------
 // Rebuild
 // ---------------------------------------------------------------------------
@@ -565,6 +595,20 @@ mod tests {
         assert_eq!(c.next(), 2);
         assert_eq!(c.next(), 3);
         assert_eq!(c.peek(), 3);
+    }
+
+    #[test]
+    fn counter_resuming_from_continues_past_prior_max() {
+        let c = Counter::resuming_from(4);
+        assert_eq!(c.peek(), 4, "resumed counter reports the prior max");
+        assert_eq!(c.next(), 5, "next seq is prior_max + 1");
+        assert_eq!(c.next(), 6);
+    }
+
+    #[test]
+    fn counter_resuming_from_zero_equals_new() {
+        let c = Counter::resuming_from(0);
+        assert_eq!(c.next(), 1, "resuming_from(0) behaves like new()");
     }
 
     #[test]

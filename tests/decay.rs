@@ -308,6 +308,17 @@ async fn purge_test_decay_events(pool: &sqlx::PgPool, run_id: &str) {
         .unwrap();
 }
 
+/// Highest persisted `seq` for a run_id (`None` when no events) — mirrors
+/// `store::max_seq_for_run` so tests assert the counter-resume invariant
+/// against the DB directly.
+async fn max_seq(pool: &sqlx::PgPool, run_id: &str) -> Option<i32> {
+    sqlx::query_scalar("SELECT MAX(seq) FROM satan_attribute_events WHERE run_id = $1")
+        .bind(run_id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
 #[tokio::test]
 async fn tick_applies_decay_and_bumps_last_decay_at() {
     let _lock = DECAY_TEST_LOCK.lock().await;
@@ -744,15 +755,14 @@ async fn rebuild_clears_last_decay_at_so_decay_rearms() {
     restore_decay_targets_global(&pool, &snapshot).await;
 }
 
-/// PROBE (T-attr-2e finding) — restart while disabled, same UTC day. Disabled
-/// ticks never bump `last_decay_at`, so cold (NULL) targets stay due; after a
-/// restart the per-day counter resets to zero and re-emits seq 1..=N under the
-/// same `run_id`, colliding with `UNIQUE (run_id, seq)`. The collision must be
-/// surfaced loudly (attributed error), never silently corrupt or swallowed.
-/// Structural fix (resume the counter from MAX(seq) on startup) is deferred to
-/// T-attr-2f.
+/// T-attr-2f — restart while disabled, same UTC day, resumes cleanly. Disabled
+/// ticks never bump `last_decay_at`, so cold (NULL) targets stay due across a
+/// restart. The per-day counter is resumed from the persisted `MAX(seq)+1` on
+/// the first post-restart tick, so the second scheduler emits a fresh seq range
+/// rather than re-emitting `1..=N` and colliding with `UNIQUE (run_id, seq)`.
+/// (Flips the T-attr-2e probe that asserted the pre-fix loud `DecaySeqCollision`.)
 #[tokio::test]
-async fn tick_restart_while_disabled_same_day_collision() {
+async fn tick_restart_while_disabled_same_day_resumes_cleanly() {
     let _lock = DECAY_TEST_LOCK.lock().await;
     let pool = common::shared_pool().await;
     let snapshot = snapshot_decay_targets_global(&pool).await;
@@ -771,6 +781,7 @@ async fn tick_restart_while_disabled_same_day_collision() {
         force_target(&pool, name.as_str(), 0.50, None).await;
     }
 
+    let n = DECAY_TARGETS.len() as i32;
     let clock = Arc::new(FakeClock::new(now));
     // Scheduler #1 inserts seq 1..=N under today's run_id, no bump.
     {
@@ -781,20 +792,48 @@ async fn tick_restart_while_disabled_same_day_collision() {
         );
         assert_eq!(s1.tick().await.unwrap(), DECAY_TARGETS.len());
     } // counter dies with s1.
+    assert_eq!(max_seq(&pool, &run_id).await, Some(n), "s1 emits seq 1..=N");
 
-    // Scheduler #2: restart same day. Counter resets → re-emits the same seqs.
+    // Scheduler #2: restart same day. Counter resumes from MAX(seq)+1, so the
+    // re-due cold targets get a fresh seq range — no collision.
     let s2 = DecayScheduler::new(
         pool.clone(),
         clock.clone(),
         Scope::Global.as_str().to_string(),
     );
-    let err = s2
-        .tick()
-        .await
-        .expect_err("restart-while-disabled same day must surface an error, not silently corrupt");
-    assert!(
-        matches!(err, satan_attrd::Error::DecaySeqCollision { .. }),
-        "collision must surface as the attributed loud error, got: {err:?}"
+    assert_eq!(
+        s2.tick().await.unwrap(),
+        DECAY_TARGETS.len(),
+        "restart-while-disabled must resume cleanly, not collide"
+    );
+
+    // 2N distinct events under the run_id, seqs 1..=2N — every row unique.
+    assert_eq!(
+        max_seq(&pool, &run_id).await,
+        Some(2 * n),
+        "s2 resumes past s1's seqs"
+    );
+    let total: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM satan_attribute_events WHERE run_id = $1")
+            .bind(&run_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let distinct: i64 = sqlx::query_scalar(
+        "SELECT COUNT(DISTINCT seq) FROM satan_attribute_events WHERE run_id = $1",
+    )
+    .bind(&run_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        total,
+        2 * i64::from(n),
+        "both ticks persisted; nothing dropped"
+    );
+    assert_eq!(
+        distinct, total,
+        "every (run_id, seq) is unique after resume"
     );
 
     // Teardown.
