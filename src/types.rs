@@ -135,6 +135,8 @@ pub enum Source {
     Resonance,
     /// IMPLEMENTED in T-attr-1e-sensor.
     Sensor,
+    /// IMPLEMENTED in T-attr-2d.
+    Maintenance,
     /// RESERVED; T-attr-1e.
     ToolError,
     /// RESERVED; out of T-attr-1.
@@ -150,6 +152,7 @@ impl Source {
             Self::Percept => "percept",
             Self::Resonance => "resonance",
             Self::Sensor => "sensor",
+            Self::Maintenance => "maintenance",
             Self::ToolError => "tool_error",
             Self::Manual => "manual",
         }
@@ -158,7 +161,10 @@ impl Source {
     /// True for sources whose `reason` enum is fixed in the contract today.
     #[must_use]
     pub const fn is_implemented(self) -> bool {
-        matches!(self, Self::Outcome | Self::Hippocampus | Self::Sensor)
+        matches!(
+            self,
+            Self::Outcome | Self::Hippocampus | Self::Sensor | Self::Maintenance
+        )
     }
 
     /// True for sources that support outcome revision (§6.2).
@@ -183,6 +189,7 @@ impl FromStr for Source {
             "percept" => Ok(Self::Percept),
             "resonance" => Ok(Self::Resonance),
             "sensor" => Ok(Self::Sensor),
+            "maintenance" => Ok(Self::Maintenance),
             "tool_error" => Ok(Self::ToolError),
             "manual" => Ok(Self::Manual),
             other => Err(crate::error::Error::InvalidSource(other.to_string())),
@@ -338,6 +345,44 @@ impl FromStr for SensorReason {
 }
 
 // ---------------------------------------------------------------------------
+// Maintenance reasons (contract §6M)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MaintenanceReason {
+    IdleDecay,
+}
+
+impl MaintenanceReason {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::IdleDecay => "idle_decay",
+        }
+    }
+}
+
+impl fmt::Display for MaintenanceReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for MaintenanceReason {
+    type Err = crate::error::Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "idle_decay" => Ok(Self::IdleDecay),
+            other => Err(crate::error::Error::InvalidReason {
+                source_name: Source::Maintenance.as_str().to_string(),
+                reason: other.to_string(),
+            }),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Cap names (contract §7)
 // ---------------------------------------------------------------------------
 
@@ -383,6 +428,7 @@ mod tests {
         assert!(Source::Outcome.is_implemented());
         assert!(Source::Hippocampus.is_implemented());
         assert!(Source::Sensor.is_implemented());
+        assert!(Source::Maintenance.is_implemented());
         assert!(!Source::Percept.is_implemented());
         assert!(!Source::Resonance.is_implemented());
         assert!(!Source::ToolError.is_implemented());
@@ -396,6 +442,7 @@ mod tests {
             Source::Percept,
             Source::Resonance,
             Source::Sensor,
+            Source::Maintenance,
             Source::ToolError,
             Source::Manual,
         ] {
@@ -438,6 +485,13 @@ mod tests {
             SensorReason::TypingIdle,
         ] {
             assert_eq!(SensorReason::from_str(r.as_str()).unwrap(), r);
+        }
+    }
+
+    #[test]
+    fn maintenance_reason_round_trip() {
+        for r in [MaintenanceReason::IdleDecay] {
+            assert_eq!(MaintenanceReason::from_str(r.as_str()).unwrap(), r);
         }
     }
 

@@ -368,7 +368,7 @@ async fn read_projection(pool: &PgPool) -> Result<(Snapshot, HashMap<AttributeNa
 // Audit payload construction (daemon → broker)
 // ---------------------------------------------------------------------------
 
-fn build_audit_payload(ev: &EventInsert) -> Value {
+pub(crate) fn build_audit_payload(ev: &EventInsert) -> Value {
     let mut payload = json!({
         "id": ev.event_id(),
         "ts": ev.ts.to_rfc3339(),

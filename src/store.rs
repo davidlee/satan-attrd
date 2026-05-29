@@ -408,6 +408,36 @@ pub async fn set_setting_bool(pool: &PgPool, name: &str, value: bool) -> Result<
 }
 
 // ---------------------------------------------------------------------------
+// Decay
+// ---------------------------------------------------------------------------
+
+/// Stamp `last_decay_at` on one projection row. Called by the decay scheduler
+/// after a successful idle-decay UPSERT to mark "decay applied for this tick"
+/// per contract §17.8 — the scheduler's "fire when `now - last_decay_at ≥ 24h`"
+/// guard reads this column on the next hourly check.
+///
+/// # Errors
+///
+/// Returns a Sqlx error on database failure.
+pub async fn bump_last_decay_at(
+    pool: &PgPool,
+    scope: Scope,
+    name: AttributeName,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    sqlx::query(
+        "UPDATE satan_attributes SET last_decay_at = $3 WHERE scope = $1 AND name = $2",
+    )
+    .bind(scope.as_str())
+    .bind(name.as_str())
+    .bind(now)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Rebuild
 // ---------------------------------------------------------------------------
 

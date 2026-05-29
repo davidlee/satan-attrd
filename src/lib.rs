@@ -29,12 +29,13 @@ pub use dispatcher::{
 };
 pub use error::{Error, Result};
 pub use store::{
-    AttributeRow, Counter, EventInsert, EventRow, format_event_id, get_setting_bool, insert_event,
-    lookup_attribute, lookup_prior_events_by_intervention, outcome_evidence_json,
-    rebuild_projection, set_setting_bool, upsert_attribute,
+    AttributeRow, Counter, EventInsert, EventRow, bump_last_decay_at, format_event_id,
+    get_setting_bool, insert_event, lookup_attribute, lookup_prior_events_by_intervention,
+    outcome_evidence_json, rebuild_projection, set_setting_bool, upsert_attribute,
 };
 pub use types::{
-    AttributeName, Cap, HippocampusReason, OutcomeReason, Scope, SensorReason, Source,
+    AttributeName, Cap, HippocampusReason, MaintenanceReason, OutcomeReason, Scope, SensorReason,
+    Source,
 };
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
