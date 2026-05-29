@@ -27,7 +27,7 @@
 //!     the run-loop's LRU.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use chrono::{DateTime, NaiveDate, Utc};
@@ -206,10 +206,13 @@ impl<C: Clock + 'static> DecayScheduler<C> {
     /// critical section: compare day, swap if rolled, clone the Arc out.
     /// Never held across `.await`.
     fn acquire_day_counter(&self, today: NaiveDate) -> Arc<Counter> {
+        // Recover from poisoning: the critical section only compares a date
+        // and swaps an Arc<Counter>, leaving no invariant a panicking holder
+        // could corrupt — reading the inner state beats aborting a tick.
         let mut guard = self
             .day_counter_state
             .lock()
-            .expect("decay day_counter_state poisoned");
+            .unwrap_or_else(PoisonError::into_inner);
         if guard.day != today {
             guard.day = today;
             guard.counter = Arc::new(Counter::new());

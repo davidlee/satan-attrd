@@ -6,7 +6,7 @@
 //! what the contract specifies (`last_decay_at TIMESTAMPTZ`). Production
 //! uses `SystemClock`; tests use `FakeClock` with `set` / `advance`.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use chrono::{DateTime, Utc};
 
@@ -40,19 +40,25 @@ impl FakeClock {
         }
     }
 
+    /// Guard recovers from poisoning: the mutex protects a plain timestamp
+    /// with no invariant a panicking holder could corrupt, so reading the
+    /// inner value is sounder than aborting a test run.
+    fn guard(&self) -> MutexGuard<'_, DateTime<Utc>> {
+        self.now.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     pub fn set(&self, now: DateTime<Utc>) {
-        *self.now.lock().expect("FakeClock mutex poisoned") = now;
+        *self.guard() = now;
     }
 
     pub fn advance(&self, by: chrono::Duration) {
-        let mut g = self.now.lock().expect("FakeClock mutex poisoned");
-        *g += by;
+        *self.guard() += by;
     }
 }
 
 impl Clock for FakeClock {
     fn now(&self) -> DateTime<Utc> {
-        *self.now.lock().expect("FakeClock mutex poisoned")
+        *self.guard()
     }
 }
 
