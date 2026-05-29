@@ -369,12 +369,11 @@ pub async fn lookup_prior_events_by_intervention(
 /// Returns `Error::InvalidArgument` if the row exists but the JSONB `value` is
 /// not a JSON boolean, or a Sqlx error on database failure.
 pub async fn get_setting_bool(pool: &PgPool, name: &str, default: bool) -> Result<bool> {
-    let row: Option<(Json<Value>,)> = sqlx::query_as(
-        "SELECT value FROM satan_attribute_settings WHERE name = $1",
-    )
-    .bind(name)
-    .fetch_optional(pool)
-    .await?;
+    let row: Option<(Json<Value>,)> =
+        sqlx::query_as("SELECT value FROM satan_attribute_settings WHERE name = $1")
+            .bind(name)
+            .fetch_optional(pool)
+            .await?;
 
     match row {
         None => Ok(default),
@@ -425,14 +424,12 @@ pub async fn bump_last_decay_at(
     name: AttributeName,
     now: DateTime<Utc>,
 ) -> Result<()> {
-    sqlx::query(
-        "UPDATE satan_attributes SET last_decay_at = $3 WHERE scope = $1 AND name = $2",
-    )
-    .bind(scope.as_str())
-    .bind(name.as_str())
-    .bind(now)
-    .execute(pool)
-    .await?;
+    sqlx::query("UPDATE satan_attributes SET last_decay_at = $3 WHERE scope = $1 AND name = $2")
+        .bind(scope.as_str())
+        .bind(name.as_str())
+        .bind(now)
+        .execute(pool)
+        .await?;
 
     Ok(())
 }
