@@ -29,6 +29,14 @@ pub enum Error {
     #[error("invalid argument: {0}")]
     InvalidArgument(String),
 
+    #[error(
+        "decay seq collision on run_id={run_id} seq={seq}: the per-UTC-day \
+         counter reset and re-emitted a persisted seq (likely a daemon restart \
+         mid-day while attribute updates were disabled, so last_decay_at was \
+         never bumped). Deferred structural fix: T-attr-2f counter-resume-on-restart."
+    )]
+    DecaySeqCollision { run_id: String, seq: i32 },
+
     #[error(transparent)]
     Sqlx(#[from] sqlx::Error),
 

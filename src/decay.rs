@@ -35,11 +35,31 @@ use sqlx::PgPool;
 
 use crate::clock::Clock;
 use crate::dispatcher::{MaintenanceInput, Snapshot, dispatch_maintenance};
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::rpc;
 use crate::run_loop;
 use crate::store::{self, Counter, bump_last_decay_at, get_setting_bool};
 use crate::types::{AttributeName, MaintenanceReason};
+
+/// The `(run_id, seq)` collision a mid-day scheduler restart provokes: the
+/// per-UTC-day counter resets to zero and re-emits seqs already persisted under
+/// the same `run_id`. Only reachable on the disabled path, where `last_decay_at`
+/// is never bumped so cold targets stay due across the restart. Because the
+/// event `id` is derived from `(run_id, seq)`, the primary-key constraint trips
+/// first; the `(run_id, seq)` unique constraint is the same violation by another
+/// name. Either is mapped to a loud `Error::DecaySeqCollision`; structural fix
+/// in T-attr-2f.
+fn is_run_seq_collision(err: &Error) -> bool {
+    matches!(
+        err,
+        Error::Sqlx(sqlx::Error::Database(db))
+            if matches!(
+                db.constraint(),
+                Some("satan_attribute_events_pkey")
+                    | Some("satan_attribute_events_run_id_seq_key")
+            )
+    )
+}
 
 /// The 4 negative-pole attributes subject to idle decay. Positive-pole
 /// attributes (curiosity, hunger, suspicion, friction) are explicitly
@@ -220,12 +240,17 @@ impl<C: Clock + 'static> DecayScheduler<C> {
         let today = now.date_naive();
         let run_id = format!("maintenance:{}", today.format("%Y-%m-%d"));
 
-        let enabled =
-            get_setting_bool(&self.pool, "attribute_updates_enabled", true).await?;
+        let enabled = get_setting_bool(&self.pool, "attribute_updates_enabled", true).await?;
         let projection = self.read_target_values().await?;
         let snapshot = Snapshot {
-            doubt: projection.get(&AttributeName::Doubt).copied().unwrap_or(0.0),
-            shame: projection.get(&AttributeName::Shame).copied().unwrap_or(0.0),
+            doubt: projection
+                .get(&AttributeName::Doubt)
+                .copied()
+                .unwrap_or(0.0),
+            shame: projection
+                .get(&AttributeName::Shame)
+                .copied()
+                .unwrap_or(0.0),
         };
         let counter = self.acquire_day_counter(today);
 
@@ -243,7 +268,25 @@ impl<C: Clock + 'static> DecayScheduler<C> {
             };
             let events = dispatch_maintenance(&input, &counter);
             for ev in &events {
-                store::insert_event(&self.pool, ev).await?;
+                if let Err(e) = store::insert_event(&self.pool, ev).await {
+                    if is_run_seq_collision(&e) {
+                        tracing::error!(
+                            run_id = %run_id,
+                            seq = ev.seq,
+                            name = ev.name.as_str(),
+                            "decay tick aborted: per-UTC-day seq counter collided \
+                             with a persisted event — likely a daemon restart \
+                             mid-day while attribute updates were disabled \
+                             (last_decay_at never bumped). Deferred structural \
+                             fix: T-attr-2f counter-resume-on-restart."
+                        );
+                        return Err(Error::DecaySeqCollision {
+                            run_id: run_id.clone(),
+                            seq: ev.seq,
+                        });
+                    }
+                    return Err(e);
+                }
                 if !ev.disabled {
                     store::upsert_attribute(
                         &self.pool,
