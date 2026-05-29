@@ -358,6 +358,56 @@ pub async fn lookup_prior_events_by_intervention(
 }
 
 // ---------------------------------------------------------------------------
+// Settings
+// ---------------------------------------------------------------------------
+
+/// Read one bool-valued row from `satan_attribute_settings`. Returns `default`
+/// if the row is absent.
+///
+/// # Errors
+///
+/// Returns `Error::InvalidArgument` if the row exists but the JSONB `value` is
+/// not a JSON boolean, or a Sqlx error on database failure.
+pub async fn get_setting_bool(pool: &PgPool, name: &str, default: bool) -> Result<bool> {
+    let row: Option<(Json<Value>,)> = sqlx::query_as(
+        "SELECT value FROM satan_attribute_settings WHERE name = $1",
+    )
+    .bind(name)
+    .fetch_optional(pool)
+    .await?;
+
+    match row {
+        None => Ok(default),
+        Some((Json(Value::Bool(b)),)) => Ok(b),
+        Some((Json(other),)) => Err(Error::InvalidArgument(format!(
+            "satan_attribute_settings[{name}].value is not a JSON bool: {other}"
+        ))),
+    }
+}
+
+/// Upsert one bool-valued row into `satan_attribute_settings`. `to_jsonb` casts
+/// the bound `BOOL` to JSONB server-side so the stored value is `true`/`false`
+/// rather than a stringified boolean.
+///
+/// # Errors
+///
+/// Returns a Sqlx error on database failure.
+pub async fn set_setting_bool(pool: &PgPool, name: &str, value: bool) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO satan_attribute_settings (name, value)
+         VALUES ($1, to_jsonb($2::boolean))
+         ON CONFLICT (name)
+         DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()",
+    )
+    .bind(name)
+    .bind(value)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Rebuild
 // ---------------------------------------------------------------------------
 

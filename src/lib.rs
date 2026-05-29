@@ -29,9 +29,9 @@ pub use dispatcher::{
 };
 pub use error::{Error, Result};
 pub use store::{
-    AttributeRow, Counter, EventInsert, EventRow, format_event_id, insert_event, lookup_attribute,
-    lookup_prior_events_by_intervention, outcome_evidence_json, rebuild_projection,
-    upsert_attribute,
+    AttributeRow, Counter, EventInsert, EventRow, format_event_id, get_setting_bool, insert_event,
+    lookup_attribute, lookup_prior_events_by_intervention, outcome_evidence_json,
+    rebuild_projection, set_setting_bool, upsert_attribute,
 };
 pub use types::{
     AttributeName, Cap, HippocampusReason, OutcomeReason, Scope, SensorReason, Source,

@@ -11,10 +11,11 @@ use serde_json::json;
 use tokio::sync::Mutex;
 
 use satan_attrd::{
-    AttributeName, Cap, Counter, EventInsert, Scope, format_event_id, insert_event,
-    lookup_attribute, lookup_prior_events_by_intervention, outcome_evidence_json,
-    rebuild_projection, upsert_attribute,
+    AttributeName, Cap, Counter, EventInsert, Scope, format_event_id, get_setting_bool,
+    insert_event, lookup_attribute, lookup_prior_events_by_intervention, outcome_evidence_json,
+    rebuild_projection, set_setting_bool, upsert_attribute,
 };
+use uuid::Uuid;
 
 // `rebuild_projection` zeros every `satan_attributes` row at the start of
 // its transaction (contract §10.5 from-zero replay). Parallel rebuild tests
@@ -625,6 +626,43 @@ async fn rebuild_is_from_zero_when_event_log_is_empty_for_scope() {
     );
 
     common::cleanup_scope(&pool, &scope).await;
+}
+
+// ---------------------------------------------------------------------------
+// Settings
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn get_setting_bool_returns_default_when_missing() {
+    let pool = common::shared_pool().await;
+    let name = format!("test_setting_{}", Uuid::new_v4().simple());
+
+    assert!(
+        get_setting_bool(&pool, &name, true).await.unwrap(),
+        "absent row must yield supplied default (true)"
+    );
+    assert!(
+        !get_setting_bool(&pool, &name, false).await.unwrap(),
+        "absent row must yield supplied default (false)"
+    );
+
+    set_setting_bool(&pool, &name, true).await.unwrap();
+    assert!(
+        get_setting_bool(&pool, &name, false).await.unwrap(),
+        "stored true must be returned regardless of default"
+    );
+
+    set_setting_bool(&pool, &name, false).await.unwrap();
+    assert!(
+        !get_setting_bool(&pool, &name, true).await.unwrap(),
+        "upsert must overwrite previously-stored value"
+    );
+
+    sqlx::query("DELETE FROM satan_attribute_settings WHERE name = $1")
+        .bind(&name)
+        .execute(&pool)
+        .await
+        .unwrap();
 }
 
 // ---------------------------------------------------------------------------
