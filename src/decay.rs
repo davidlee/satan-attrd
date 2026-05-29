@@ -1,27 +1,45 @@
 //! Idle-decay scheduler (design-contract §8 + §17.8).
 //!
-//! T-attr-2c lands the **infrastructure**: the `Clock` integration, the
-//! `tokio::time::interval` driver, and the read-side `check_due` that
-//! identifies rows pending decay. **No firing yet** — each tick logs the
-//! would-decay set and returns; T-attr-2d wires the synthesise + dispatch
-//! + `last_decay_at` bump path on top of this skeleton.
+//! T-attr-2c lands the infrastructure: `Clock` integration, hourly
+//! `tokio::time::interval` driver, and the read-side `check_due`.
+//! T-attr-2d extends `tick` to apply decay — the same shape as the
+//! source-event loop (run_loop.rs:586-601), driven from the scheduler
+//! rather than a LISTEN payload.
 //!
 //! Per §17.8:
 //!   * 4 negative-pole targets: shame, doubt, brooding, metamorphosis.
 //!   * Hourly check, daily fire — `(now - last_decay_at) ≥ 24h` OR
 //!     `last_decay_at IS NULL`.
-//!   * Single-tick catch-up across daemon downtime; the `days_since_last`
-//!     field preserves the gap for observability when T-attr-2d ships.
+//!   * Single-tick catch-up across daemon downtime; the
+//!     `days_since_last` field preserves the gap for observability.
+//!
+//! Per §17.5 (resolved §15 Q7, option A):
+//!   * `attribute_updates_enabled` is read from `satan_attribute_settings`
+//!     at the start of each tick and threaded into `MaintenanceInput.enabled`
+//!     → `EventInsert.disabled`.
+//!   * Disabled rows: event written with `disabled=true`; UPSERT skipped;
+//!     `last_decay_at` NOT bumped (so the next-enabled tick still fires).
+//!
+//! Per §4.2:
+//!   * `run_id` is `maintenance:<YYYY-MM-DD>` (UTC).
+//!   * `seq` is allocated from a per-UTC-day `Counter` rotated on UTC day
+//!     roll, keeping seq monotonic within each run_id without cross-cutting
+//!     the run-loop's LRU.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use sqlx::PgPool;
 
 use crate::clock::Clock;
+use crate::dispatcher::{MaintenanceInput, Snapshot, dispatch_maintenance};
 use crate::error::Result;
-use crate::types::AttributeName;
+use crate::rpc;
+use crate::run_loop;
+use crate::store::{self, Counter, bump_last_decay_at, get_setting_bool};
+use crate::types::{AttributeName, MaintenanceReason};
 
 /// The 4 negative-pole attributes subject to idle decay. Positive-pole
 /// attributes (curiosity, hunger, suspicion, friction) are explicitly
@@ -55,22 +73,46 @@ pub struct DueRow {
     pub days_since_last: Option<i64>,
 }
 
+/// Per-UTC-day Counter state. The (day, counter) pair rotates whenever
+/// `tick` observes a date roll, so each `maintenance:<utc-day>` run_id
+/// gets monotonic `seq` from zero. Held under a `std::sync::Mutex` —
+/// the critical section is the rotation check + Arc clone, never held
+/// across `.await`.
+#[derive(Debug)]
+struct DayCounterState {
+    day: NaiveDate,
+    counter: Arc<Counter>,
+}
+
 #[derive(Debug)]
 pub struct DecayScheduler<C: Clock> {
     pool: PgPool,
     clock: Arc<C>,
     scope: String,
+    day_counter_state: Mutex<DayCounterState>,
 }
 
 impl<C: Clock + 'static> DecayScheduler<C> {
     #[must_use]
     pub fn new(pool: PgPool, clock: Arc<C>, scope: String) -> Self {
-        Self { pool, clock, scope }
+        // Sentinel day (MIN) guarantees the first tick rotates into a
+        // fresh counter for whatever today is. Avoids snapshotting
+        // wall-clock at construction time, which would diverge from
+        // FakeClock-based tests.
+        let day_counter_state = Mutex::new(DayCounterState {
+            day: NaiveDate::MIN,
+            counter: Arc::new(Counter::new()),
+        });
+        Self {
+            pool,
+            clock,
+            scope,
+            day_counter_state,
+        }
     }
 
     /// Identify rows whose `last_decay_at` is NULL or older than 24h.
-    /// Pure read — does not mutate state. T-attr-2d turns the result
-    /// into dispatched decay events.
+    /// Pure read — does not mutate state.
     ///
     /// # Errors
     ///
@@ -116,27 +158,118 @@ impl<C: Clock + 'static> DecayScheduler<C> {
         Ok(due)
     }
 
-    /// One scheduler tick. Identifies due rows, logs the set, returns the
-    /// count. T-attr-2c stops here; T-attr-2d will dispatch synthetic
-    /// `(source=maintenance, reason=idle_decay)` events from inside this
-    /// method.
+    /// Read current values for all DECAY_TARGETS at `self.scope`. Used
+    /// to seed `MaintenanceInput.projection` + `Snapshot` once per tick
+    /// (snapshot is §6.3 pre-dispatch; consistency within the tick is the
+    /// guarantee — concurrent UPSERTs between this read and the apply
+    /// loop are accepted, matching the source-event loop's behaviour).
+    async fn read_target_values(&self) -> Result<HashMap<AttributeName, f64>> {
+        let names: Vec<&'static str> = DECAY_TARGETS.iter().map(|n| n.as_str()).collect();
+        let rows: Vec<(String, f64)> = sqlx::query_as(
+            "SELECT name, value FROM satan_attributes
+             WHERE scope = $1 AND name = ANY($2)",
+        )
+        .bind(&self.scope)
+        .bind(&names)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out = HashMap::with_capacity(rows.len());
+        for (name_str, value) in rows {
+            if let Ok(name) = name_str.parse::<AttributeName>() {
+                out.insert(name, value);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Acquire (or rotate) the per-UTC-day Counter. Brief sync-mutex
+    /// critical section: compare day, swap if rolled, clone the Arc out.
+    /// Never held across `.await`.
+    fn acquire_day_counter(&self, today: NaiveDate) -> Arc<Counter> {
+        let mut guard = self
+            .day_counter_state
+            .lock()
+            .expect("decay day_counter_state poisoned");
+        if guard.day != today {
+            guard.day = today;
+            guard.counter = Arc::new(Counter::new());
+        }
+        Arc::clone(&guard.counter)
+    }
+
+    /// One scheduler tick. Reads `attribute_updates_enabled`, identifies
+    /// due rows, dispatches one synthetic `(maintenance, idle_decay)`
+    /// event per row, applies the EventInsert pattern (insert_event →
+    /// conditional UPSERT → audit RPC → conditional `last_decay_at` bump).
+    ///
+    /// Returns the number of due rows processed (0 when nothing was due;
+    /// the count when firing happened — including disabled rows whose
+    /// events were still written).
     ///
     /// # Errors
     ///
     /// Returns a Sqlx error on database failure.
     pub async fn tick(&self) -> Result<usize> {
         let due = self.check_due().await?;
-        if !due.is_empty() {
-            let names: Vec<&str> = due.iter().map(|r| r.name.as_str()).collect();
-            tracing::info!(
-                count = due.len(),
-                names = ?names,
-                "decay tick: rows due (T-attr-2c skeleton — no firing yet)"
-            );
-        } else {
+        if due.is_empty() {
             tracing::debug!("decay tick: nothing due");
+            return Ok(0);
         }
-        Ok(due.len())
+
+        let now = self.clock.now();
+        let today = now.date_naive();
+        let run_id = format!("maintenance:{}", today.format("%Y-%m-%d"));
+
+        let enabled =
+            get_setting_bool(&self.pool, "attribute_updates_enabled", true).await?;
+        let projection = self.read_target_values().await?;
+        let snapshot = Snapshot {
+            doubt: projection.get(&AttributeName::Doubt).copied().unwrap_or(0.0),
+            shame: projection.get(&AttributeName::Shame).copied().unwrap_or(0.0),
+        };
+        let counter = self.acquire_day_counter(today);
+
+        let count = due.len();
+        for row in due {
+            let input = MaintenanceInput {
+                run_id: run_id.clone(),
+                ts: now,
+                reason: MaintenanceReason::IdleDecay,
+                target: row.name,
+                days_since_last: row.days_since_last.unwrap_or(0).max(0),
+                enabled,
+                snapshot: snapshot.clone(),
+                projection: projection.clone(),
+            };
+            let events = dispatch_maintenance(&input, &counter);
+            for ev in &events {
+                store::insert_event(&self.pool, ev).await?;
+                if !ev.disabled {
+                    store::upsert_attribute(
+                        &self.pool,
+                        ev.scope,
+                        ev.name,
+                        ev.new_value,
+                        &ev.evidence_json,
+                        ev.ts,
+                    )
+                    .await?;
+                }
+                let audit_payload = run_loop::build_audit_payload(ev);
+                rpc::enqueue_audit_event(&self.pool, &audit_payload).await?;
+                if !ev.disabled {
+                    bump_last_decay_at(&self.pool, ev.scope, ev.name, ev.ts).await?;
+                }
+            }
+        }
+
+        tracing::info!(
+            count,
+            enabled,
+            run_id = %run_id,
+            "decay tick: applied"
+        );
+        Ok(count)
     }
 
     /// Driver loop. `tokio::time::interval` fires every hour; each fire
@@ -148,7 +281,7 @@ impl<C: Clock + 'static> DecayScheduler<C> {
     ///
     /// Returns only on a fatal error the loop cannot recover from. The
     /// current implementation does not have one — kept as `Result` so
-    /// T-attr-2d can promote tick failures without changing the
+    /// future changes can promote tick failures without changing the
     /// signature.
     pub async fn run(self) -> Result<()> {
         let mut interval = tokio::time::interval(DECAY_TICK_INTERVAL);

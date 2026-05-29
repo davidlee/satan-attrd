@@ -1,10 +1,13 @@
-//! Decay scheduler integration tests (T-attr-2c — Clock seam +
-//! check_due + tick read-side).
+//! Decay scheduler integration tests.
 //!
-//! T-attr-2c is the **skeleton**: the scheduler identifies due rows and
-//! logs, but does NOT mutate state. T-attr-2d will extend `tick` to
-//! dispatch synthetic `(maintenance, idle_decay)` events; the
-//! `tick_does_not_mutate_state` test enforces the skeleton boundary.
+//! Two test families:
+//!   * `check_due_*` — T-attr-2c read-side. Use `common::unique_scope()`
+//!     for parallel isolation (read-only, so no scope-writer collision).
+//!   * `tick_*` — T-attr-2d apply-side. Use `Scope::Global` because the
+//!     `dispatch_maintenance` writer hardcodes `Scope::Global` (the only
+//!     production scope by §3 design). Serialised via `DECAY_TEST_LOCK`
+//!     against parallel decay tests and the four `DECAY_TARGETS` global
+//!     rows are snapshot/restored around each test.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod common;
@@ -13,8 +16,15 @@ use std::sync::Arc;
 
 use chrono::{Duration as ChronoDuration, SubsecRound, Utc};
 use serde_json::json;
+use tokio::sync::Mutex;
 
-use satan_attrd::{AttributeName, DECAY_TARGETS, DecayScheduler, FakeClock};
+use satan_attrd::{AttributeName, DECAY_TARGETS, DecayScheduler, FakeClock, Scope};
+
+/// Serialises tests that mutate the four `DECAY_TARGETS` rows at
+/// `scope = 'global'`. Parallel `tick_*` tests would race each other's
+/// `value` + `last_decay_at` reads; the read-only `check_due_*` tests at
+/// unique scopes do not need this lock.
+static DECAY_TEST_LOCK: Mutex<()> = Mutex::const_new(());
 
 async fn set_last_decay_at(
     pool: &sqlx::PgPool,
@@ -199,56 +209,207 @@ async fn check_due_handles_mixed_freshness() {
     common::cleanup_scope(&pool, &scope).await;
 }
 
+// ---------------------------------------------------------------------------
+// T-attr-2d apply-side: tick fires (golden + floor)
+// ---------------------------------------------------------------------------
+
+async fn snapshot_decay_targets_global(pool: &sqlx::PgPool) -> Vec<(String, f64, Option<chrono::DateTime<Utc>>, serde_json::Value)> {
+    let names: Vec<&'static str> = DECAY_TARGETS.iter().map(|n| n.as_str()).collect();
+    sqlx::query_as(
+        "SELECT name, value, last_decay_at, evidence_json
+         FROM satan_attributes
+         WHERE scope = 'global' AND name = ANY($1)",
+    )
+    .bind(&names)
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+async fn restore_decay_targets_global(
+    pool: &sqlx::PgPool,
+    rows: &[(String, f64, Option<chrono::DateTime<Utc>>, serde_json::Value)],
+) {
+    for (name, value, last_decay_at, evidence_json) in rows {
+        sqlx::query(
+            "UPDATE satan_attributes
+             SET value = $1, last_decay_at = $2, evidence_json = $3, updated_at = NOW()
+             WHERE scope = 'global' AND name = $4",
+        )
+        .bind(value)
+        .bind(*last_decay_at)
+        .bind(evidence_json)
+        .bind(name)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+}
+
+async fn purge_test_decay_events(pool: &sqlx::PgPool, run_id: &str) {
+    sqlx::query("DELETE FROM satan_attribute_events WHERE run_id = $1")
+        .bind(run_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    let prefix = format!("{run_id}.%");
+    sqlx::query("DELETE FROM satan_audit_inbox WHERE payload_json->>'id' LIKE $1")
+        .bind(&prefix)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
 #[tokio::test]
-async fn tick_does_not_mutate_state() {
-    // T-attr-2c skeleton boundary: tick reads + logs, never writes.
-    // T-attr-2d will lift this guard when firing lands.
+async fn tick_applies_decay_and_bumps_last_decay_at() {
+    let _lock = DECAY_TEST_LOCK.lock().await;
     let pool = common::shared_pool().await;
-    let scope = common::unique_scope();
-    // Truncate to microseconds — PG TIMESTAMPTZ stores us-precision, so a
-    // chrono ns-precision value round-trips lossy. Truncating up-front
-    // keeps the post-fetch equality clean without a tolerance window.
+    let snapshot = snapshot_decay_targets_global(&pool).await;
+
+    // Truncate to microseconds — PG TIMESTAMPTZ stores us-precision; chrono
+    // ns-precision values round-trip lossy. Truncating up front keeps the
+    // post-fetch equality clean.
     let now = Utc::now().trunc_subsecs(6);
     let stale = now - ChronoDuration::hours(48);
+    let expected_run_id_pre = format!("maintenance:{}", now.date_naive().format("%Y-%m-%d"));
+    // Pre-purge: a prior failed run can leave attribute_events at this
+    // run_id, breaking the seq=1 uniqueness guarantee on re-run.
+    purge_test_decay_events(&pool, &expected_run_id_pre).await;
 
+    // Force each global decay-target row to a known (0.50, stale) state.
     for name in DECAY_TARGETS {
-        common::upsert_raw(&pool, &scope, name.as_str(), 0.5, &json!({})).await;
-        set_last_decay_at(&pool, &scope, name.as_str(), stale).await;
+        sqlx::query(
+            "UPDATE satan_attributes
+             SET value = 0.50, last_decay_at = $1, evidence_json = '{}'::jsonb
+             WHERE scope = 'global' AND name = $2",
+        )
+        .bind(stale)
+        .bind(name.as_str())
+        .execute(&pool)
+        .await
+        .unwrap();
     }
 
+    let scope = Scope::Global.as_str().to_string();
     let clock = Arc::new(FakeClock::new(now));
-    let scheduler = DecayScheduler::new(pool.clone(), clock, scope.clone());
+    let scheduler = DecayScheduler::new(pool.clone(), clock, scope);
     let count = scheduler.tick().await.unwrap();
-    assert_eq!(count, DECAY_TARGETS.len());
+    assert_eq!(count, DECAY_TARGETS.len(), "all 4 targets should fire");
+
+    let expected_run_id = format!("maintenance:{}", now.date_naive().format("%Y-%m-%d"));
 
     for name in DECAY_TARGETS {
-        let (value, last) = fetch_state(&pool, &scope, name.as_str()).await;
+        let (value, last) = fetch_state(&pool, "global", name.as_str()).await;
         assert!(
-            (value - 0.5).abs() < 1e-9,
-            "{}: value mutated by tick (skeleton must not write)",
-            name
+            (value - 0.49).abs() < 1e-9,
+            "{name}: expected 0.49 after -0.01 decay, got {value}"
         );
         assert_eq!(
             last,
-            Some(stale),
-            "{}: last_decay_at mutated by tick (skeleton must not bump)",
-            name
+            Some(now),
+            "{name}: last_decay_at should be bumped to tick `now`"
         );
+
+        let event: (String, String, f64, f64, serde_json::Value, bool) = sqlx::query_as(
+            "SELECT source, reason, old_value, new_value, evidence_json, disabled
+             FROM satan_attribute_events
+             WHERE run_id = $1 AND scope = 'global' AND name = $2",
+        )
+        .bind(&expected_run_id)
+        .bind(name.as_str())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(event.0, "maintenance");
+        assert_eq!(event.1, "idle_decay");
+        assert!((event.2 - 0.50).abs() < 1e-9);
+        assert!((event.3 - 0.49).abs() < 1e-9);
+        assert_eq!(event.4["days_since_last"].as_i64(), Some(2));
+        assert_eq!(
+            event.4["tick_utc_day"].as_str(),
+            Some(now.date_naive().format("%Y-%m-%d").to_string().as_str())
+        );
+        assert!(!event.5, "{name}: event should not be marked disabled");
     }
 
-    // No event rows written either — `satan_attribute_events` for this
-    // scope should remain empty since no source events were dispatched.
-    let event_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM satan_attribute_events WHERE scope = $1",
+    // Audit inbox got 4 rows for this run (one per attribute event).
+    let audit_prefix = format!("{expected_run_id}.%");
+    let audit_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM satan_audit_inbox WHERE payload_json->>'id' LIKE $1",
     )
-    .bind(&scope)
+    .bind(&audit_prefix)
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(
-        event_count, 0,
-        "tick skeleton must not emit attribute events"
-    );
+    assert_eq!(audit_count, DECAY_TARGETS.len() as i64);
 
-    common::cleanup_scope(&pool, &scope).await;
+    purge_test_decay_events(&pool, &expected_run_id).await;
+    restore_decay_targets_global(&pool, &snapshot).await;
+}
+
+#[tokio::test]
+async fn tick_clamps_floor_to_zero_with_range_clamp_cap() {
+    let _lock = DECAY_TEST_LOCK.lock().await;
+    let pool = common::shared_pool().await;
+    let snapshot = snapshot_decay_targets_global(&pool).await;
+
+    let now = Utc::now().trunc_subsecs(6);
+    let stale = now - ChronoDuration::hours(48);
+    let run_id_pre = format!("maintenance:{}", now.date_naive().format("%Y-%m-%d"));
+    purge_test_decay_events(&pool, &run_id_pre).await;
+
+    // Seed Shame at 0.005 — one -0.01 tick clamps to 0.0 with range_clamp.
+    // Other targets parked at a fresh last_decay_at so they don't fire and
+    // pollute the assertion set.
+    sqlx::query(
+        "UPDATE satan_attributes
+         SET value = 0.005, last_decay_at = $1, evidence_json = '{}'::jsonb
+         WHERE scope = 'global' AND name = 'shame'",
+    )
+    .bind(stale)
+    .execute(&pool)
+    .await
+    .unwrap();
+    for name in [
+        AttributeName::Doubt,
+        AttributeName::Brooding,
+        AttributeName::Metamorphosis,
+    ] {
+        sqlx::query(
+            "UPDATE satan_attributes
+             SET value = 0.50, last_decay_at = NOW(), evidence_json = '{}'::jsonb
+             WHERE scope = 'global' AND name = $1",
+        )
+        .bind(name.as_str())
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    let clock = Arc::new(FakeClock::new(now));
+    let scheduler = DecayScheduler::new(
+        pool.clone(),
+        clock,
+        Scope::Global.as_str().to_string(),
+    );
+    let count = scheduler.tick().await.unwrap();
+    assert_eq!(count, 1, "only Shame should be due");
+
+    let (value, last) = fetch_state(&pool, "global", "shame").await;
+    assert!(value.abs() < 1e-9, "expected floor at 0.0, got {value}");
+    assert_eq!(last, Some(now), "last_decay_at should be bumped");
+
+    let run_id = format!("maintenance:{}", now.date_naive().format("%Y-%m-%d"));
+    let caps_json: serde_json::Value = sqlx::query_scalar(
+        "SELECT caps_applied FROM satan_attribute_events
+         WHERE run_id = $1 AND scope = 'global' AND name = 'shame'",
+    )
+    .bind(&run_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(caps_json, json!(["range_clamp"]));
+
+    purge_test_decay_events(&pool, &run_id).await;
+    restore_decay_targets_global(&pool, &snapshot).await;
 }
