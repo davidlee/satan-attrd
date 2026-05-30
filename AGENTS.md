@@ -15,8 +15,9 @@ pointers into the broker repo.
 - Don't fiddle with `git stash` — `$HOME` is itself a git repo;
   stashing from any subdir sweeps all untracked files in `~/`.
   Use `git show HEAD:path` for cross-checks instead.
-- Don't commit until `just check` is green. Clippy is
-  `-D unwrap_used -D expect_used`; that is not negotiable.
+- Don't commit until `just check` is green. The lint policy is
+  POL-001 (`.spec-driver/policies/`): strict clippy, zero warnings,
+  `#[expect(..., reason)]` over `#[allow]`. Not negotiable.
 - Don't auto-migrate on daemon start. Migration is an explicit
   `satan-attrd migrate` invocation. Auto-migration races other
   agents.
