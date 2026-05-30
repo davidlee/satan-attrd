@@ -80,8 +80,6 @@ async fn upsert_round_trip_isolated_scope() {
     let (value, evidence) = common::select_raw(&pool, &scope, "shame").await.unwrap();
     assert!((value - 0.25).abs() < 1e-9);
     assert_eq!(evidence["intervention_id"], "iv1");
-
-    common::cleanup_scope(&pool, &scope).await;
 }
 
 #[tokio::test]
@@ -161,8 +159,6 @@ async fn event_insert_round_trip() {
     assert_eq!(row.evidence_json["confidence"], "medium");
     assert!(row.caps_applied.as_array().unwrap().is_empty());
     assert!(!row.disabled);
-
-    common::cleanup_run(&pool, &run_id).await;
 }
 
 #[tokio::test]
@@ -219,8 +215,6 @@ async fn counter_monotonic_within_run_with_unique_seqs_in_db() {
         matches!(err, satan_attrd::Error::Sqlx(_)),
         "expected UNIQUE collision, got {err:?}"
     );
-
-    common::cleanup_run(&pool, &run_id).await;
 }
 
 #[tokio::test]
@@ -264,8 +258,6 @@ async fn caps_applied_round_trip() {
     assert_eq!(caps.len(), 2);
     assert_eq!(caps[0], "friction_cap");
     assert_eq!(caps[1], "range_clamp");
-
-    common::cleanup_run(&pool, &run_id).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -331,8 +323,6 @@ async fn prior_event_lookup_filters_by_intervention_and_name() {
         .unwrap();
     assert_eq!(shame_for_b.len(), 1);
     assert!((shame_for_b[0].new_value - 0.30).abs() < 1e-9);
-
-    common::cleanup_run(&pool, &run_id).await;
 }
 
 #[tokio::test]
@@ -396,8 +386,6 @@ async fn prior_event_lookup_uses_expression_index() {
         plan_text.contains("satan_attribute_events_iv_idx"),
         "expression index should appear in EXPLAIN plan; got:\n{plan_text}"
     );
-
-    common::cleanup_run(&pool, &run_id).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -480,9 +468,6 @@ async fn rebuild_replays_events_in_ts_run_seq_order() {
         "rebuild should land on the latest new_value, got {value}"
     );
     assert_eq!(evidence["classification"], "contradicted");
-
-    common::cleanup_run(&pool, &run_id).await;
-    common::cleanup_scope(&pool, &scope).await;
 }
 
 #[tokio::test]
@@ -548,9 +533,6 @@ async fn rebuild_default_skips_disabled_events() {
         (value - 0.50).abs() < 1e-9,
         "include-disabled rebuild must apply disabled events; got {value}"
     );
-
-    common::cleanup_run(&pool, &run_id).await;
-    common::cleanup_scope(&pool, &scope).await;
 }
 
 #[tokio::test]
@@ -624,8 +606,6 @@ async fn rebuild_is_from_zero_when_event_log_is_empty_for_scope() {
         last_decay_after.is_none(),
         "rebuild must reset last_decay_at to NULL (§17.8); got {last_decay_after:?}"
     );
-
-    common::cleanup_scope(&pool, &scope).await;
 }
 
 // ---------------------------------------------------------------------------

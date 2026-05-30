@@ -134,8 +134,6 @@ async fn golden_15_outcome_deltas() {
             }
         }
     }
-
-    common::cleanup_run(&pool, &run_id).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -179,8 +177,6 @@ async fn harmful_snapshot_freezes_friction_cap_inputs() {
     for ev in &events {
         insert_event(&pool, ev).await.unwrap();
     }
-
-    common::cleanup_run(&pool, &run_id).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -210,8 +206,6 @@ async fn range_clamp_upper_via_integration() {
     assert!(close(shame.new_value, 1.0));
     assert!(shame.caps_applied.contains(&Cap::RangeClamp));
     insert_event(&pool, shame).await.unwrap();
-
-    common::cleanup_run(&pool, &run_id).await;
 }
 
 #[tokio::test]
@@ -237,8 +231,6 @@ async fn range_clamp_lower_via_integration() {
     assert!(close(friction.new_value, 0.0));
     assert!(friction.caps_applied.contains(&Cap::RangeClamp));
     insert_event(&pool, friction).await.unwrap();
-
-    common::cleanup_run(&pool, &run_id).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -283,8 +275,6 @@ async fn disabled_emit_writes_event_row_with_disabled_true() {
             "disabled events must not contribute to prior_actual sum ({name:?} = {sum})"
         );
     }
-
-    common::cleanup_run(&pool, &run_id).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -376,7 +366,6 @@ async fn revision_uses_actually_logged_prior_delta() {
     );
 
     insert_event(&pool, shame).await.unwrap();
-    common::cleanup_run(&pool, &run_id).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -472,8 +461,6 @@ async fn revision_chain_sums_prior_actuals() {
         "step-3 revision delta = harmful_theoretical(0.30) - chained_prior(0.15) = 0.15, got {}",
         shame.delta()
     );
-
-    common::cleanup_run(&pool, &run_id).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -520,6 +507,4 @@ async fn friction_cap_via_direct_store_helper() {
         disabled: false,
     };
     insert_event(&pool, &ev).await.unwrap();
-
-    common::cleanup_run(&pool, &run_id).await;
 }

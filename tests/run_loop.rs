@@ -7,13 +7,15 @@
 //!   3. Asserts on `satan_attribute_events`, `satan_attributes`, and
 //!      `satan_audit_inbox` (the broker-side LISTEN consumer in the broker
 //!      tests).
-//!   4. Cleans up by `run_id`.
+//!
+//! Each test runs on its own disposable database (`common::shared_pool`), so
+//! there is no manual row cleanup.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod common;
 
-use common::{cleanup_run, shared_pool, unique_run_id};
+use common::{shared_pool, unique_run_id};
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use sqlx::types::Json;
@@ -74,20 +76,6 @@ async fn event_count_for_run(pool: &PgPool, run_id: &str) -> i64 {
     n
 }
 
-async fn cleanup(pool: &PgPool, run_id: &str) {
-    cleanup_run(pool, run_id).await;
-    sqlx::query("DELETE FROM satan_audit_inbox WHERE payload_json->>'id' LIKE $1")
-        .bind(format!("{run_id}.attr%"))
-        .execute(pool)
-        .await
-        .unwrap();
-    sqlx::query("DELETE FROM satan_outcome_inbox WHERE payload_json->>'run_id' = $1")
-        .bind(run_id)
-        .execute(pool)
-        .await
-        .unwrap();
-}
-
 // ---------------------------------------------------------------------------
 // tests
 // ---------------------------------------------------------------------------
@@ -145,8 +133,6 @@ async fn outcome_inbox_to_audit_inbox_end_to_end_contradicted_medium() {
         .await
         .unwrap();
     assert!(pending.is_empty(), "outcome inbox row not deleted");
-
-    cleanup(&pool, &run_id).await;
 }
 
 #[tokio::test]
@@ -214,8 +200,6 @@ async fn outcome_inbox_disabled_does_not_upsert_projection() {
     for a in &audits {
         assert_eq!(a["disabled"], json!(true));
     }
-
-    cleanup(&pool, &run_id).await;
 }
 
 #[tokio::test]
@@ -248,8 +232,6 @@ async fn outcome_inbox_rejects_bad_schema_version() {
         .await
         .unwrap();
     assert!(pending.is_empty());
-
-    cleanup(&pool, &run_id).await;
 }
 
 #[tokio::test]
@@ -321,8 +303,6 @@ async fn outcome_inbox_revision_uses_actual_prior_deltas() {
         );
         assert!(ev["prior_actual"].is_number(), "prior_actual missing");
     }
-
-    cleanup(&pool, &run_id).await;
 }
 
 #[tokio::test]

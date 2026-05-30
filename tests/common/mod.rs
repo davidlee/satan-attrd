@@ -244,21 +244,3 @@ pub async fn select_raw(
     .unwrap();
     row.map(|(v, e)| (v, e.0))
 }
-
-/// Delete every row this test created. Call from a test's tail or via a
-/// `Drop` guard pattern; not auto-invoked.
-pub async fn cleanup_scope(pool: &PgPool, scope: &str) {
-    sqlx::query("DELETE FROM satan_attributes WHERE scope = $1")
-        .bind(scope)
-        .execute(pool)
-        .await
-        .unwrap();
-}
-
-pub async fn cleanup_run(pool: &PgPool, run_id: &str) {
-    sqlx::query("DELETE FROM satan_attribute_events WHERE run_id = $1")
-        .bind(run_id)
-        .execute(pool)
-        .await
-        .unwrap();
-}

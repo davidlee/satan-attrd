@@ -121,8 +121,6 @@ async fn check_due_returns_rows_with_null_last_decay_at() {
             row.name
         );
     }
-
-    common::cleanup_scope(&pool, &scope).await;
 }
 
 #[tokio::test]
@@ -149,8 +147,6 @@ async fn check_due_returns_rows_older_than_24h() {
             row.name
         );
     }
-
-    common::cleanup_scope(&pool, &scope).await;
 }
 
 #[tokio::test]
@@ -173,8 +169,6 @@ async fn check_due_skips_rows_within_24h() {
         "23h-old rows should not be due; got {} rows",
         due.len()
     );
-
-    common::cleanup_scope(&pool, &scope).await;
 }
 
 #[tokio::test]
@@ -207,8 +201,6 @@ async fn check_due_ignores_non_decay_target_attributes() {
         !due.iter().any(|r| r.name == AttributeName::Curiosity),
         "Curiosity (positive-pole) must not be a decay target"
     );
-
-    common::cleanup_scope(&pool, &scope).await;
 }
 
 #[tokio::test]
@@ -241,8 +233,6 @@ async fn check_due_handles_mixed_freshness() {
     for row in &due {
         assert_eq!(row.days_since_last, Some(2));
     }
-
-    common::cleanup_scope(&pool, &scope).await;
 }
 
 // ---------------------------------------------------------------------------

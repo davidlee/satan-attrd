@@ -1,4 +1,7 @@
 # export DATABASE_URL := "postgres:///satan_memory_test?host=/run/postgresql"
+# Tests treat DATABASE_URL purely as a server/role pointer: the harness
+# (tests/common/mod.rs) ignores the db component and provisions a fresh
+# disposable `satan_attrd_test_*` database per test.
 export DATABASE_URL := "postgresql://postgres:postgres@127.0.0.1:54322/postgres"
 
 default: check
