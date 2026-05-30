@@ -8,7 +8,13 @@
 //! Production can never be a write target; a panicking test leaves no orphaned
 //! rows because its whole database is disposable. Databases left by prior runs
 //! are reclaimed by a lock-free, age-filtered sweep on first use (DE-002).
-#![allow(clippy::unwrap_used, clippy::expect_used, dead_code)]
+#![expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::disallowed_methods,
+    unreachable_pub,
+    reason = "integration test harness: unwrap/expect for fixtures, DATABASE_URL env access is the harness's job, pub items exported to sibling test crates"
+)]
 
 use std::str::FromStr;
 use std::sync::{LazyLock, Once};
@@ -110,6 +116,10 @@ pub async fn sweep_stale(admin: &mut PgConnection) {
         if epoch_of(&db).is_some_and(|ms| ms < cutoff) {
             // `db` is a server-generated name (prefix + epoch + uuid); safe to
             // interpolate. Identifiers cannot be bound as parameters.
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "DROP DATABASE may fail on live connections; ignore and let next run reclaim"
+            )]
             let _ = sqlx::query(&format!(r#"DROP DATABASE IF EXISTS "{db}""#))
                 .execute(&mut *admin)
                 .await;
@@ -127,6 +137,10 @@ pub async fn create_database(admin: &mut PgConnection, name: &str) {
     let Err(e) = sqlx::query(&sql).execute(&mut *admin).await else {
         return;
     };
+    #[expect(
+        clippy::panic,
+        reason = "test harness: CREATE DATABASE privilege failure needs loud panic"
+    )]
     match e
         .as_database_error()
         .and_then(sqlx::error::DatabaseError::code)

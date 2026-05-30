@@ -1,18 +1,27 @@
 //! Integration tests for the T-attr-1c dispatcher.
 //!
 //! Pure-function behaviour (delta table, confidence weighting, caps,
-//! snapshot ordering, range_clamp, revision union) is covered in unit
+//! snapshot ordering, `range_clamp`, revision union) is covered in unit
 //! tests under `src/dispatcher.rs`. This file exercises the DB-touching
-//! pieces: gather_prior_actuals against the real event log + the revision
-//! arithmetic that closes around it; full dispatch → insert_event round-
-//! trip; the friction_cap forward-compat direct-store fixture.
+//! pieces: `gather_prior_actuals` against the real event log + the revision
+//! arithmetic that closes around it; full dispatch → `insert_event` round-
+//! trip; the `friction_cap` forward-compat direct-store fixture.
 //!
 //! Requires Postgres reachable at `$DATABASE_URL`. Each test allocates a
-//! unique run_id (and per-test intervention ids derived from it) so writes
+//! unique `run_id` (and per-test intervention ids derived from it) so writes
 //! never collide between parallel cases.
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![expect(
+    clippy::unwrap_used,
+    clippy::tests_outside_test_module,
+    clippy::indexing_slicing,
+    reason = "integration test crate: unwrap for fixtures, tests at crate level, index known JSON keys"
+)]
 
+#[expect(
+    dead_code,
+    reason = "test helpers shared across crates; unused in this binary"
+)]
 mod common;
 
 use std::collections::HashMap;

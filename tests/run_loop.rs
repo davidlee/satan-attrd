@@ -11,8 +11,17 @@
 //! Each test runs on its own disposable database (`common::shared_pool`), so
 //! there is no manual row cleanup.
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![expect(
+    clippy::unwrap_used,
+    clippy::tests_outside_test_module,
+    clippy::indexing_slicing,
+    reason = "integration test crate: unwrap for fixtures, tests at crate level, index known JSON keys"
+)]
 
+#[expect(
+    dead_code,
+    reason = "test helpers shared across crates; unused in this binary"
+)]
 mod common;
 
 use common::{shared_pool, unique_run_id};

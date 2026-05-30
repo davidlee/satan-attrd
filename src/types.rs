@@ -406,7 +406,11 @@ impl Cap {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::single_element_loop,
+    reason = "test fixtures: unwrap on known-good roundtrip values; single-element loop is idiomatic test for exhaustiveness pattern"
+)]
 mod tests {
     use super::*;
 

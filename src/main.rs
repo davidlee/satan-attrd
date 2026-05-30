@@ -24,10 +24,17 @@ fn init_tracing() {
 }
 
 fn database_url() -> Result<String, String> {
-    std::env::var("DATABASE_URL").map_err(|_| "DATABASE_URL is not set".to_string())
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "DATABASE_URL is the standard config mechanism for postgres daemons"
+    )]
+    std::env::var("DATABASE_URL").map_err(|e| format!("DATABASE_URL is not set: {e}"))
 }
 
-#[allow(clippy::print_stderr)]
+#[expect(
+    clippy::print_stderr,
+    reason = "usage text goes to stderr per unix convention"
+)]
 fn print_usage() {
     eprintln!(
         "satan-attrd {ver}\n\

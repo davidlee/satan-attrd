@@ -10,7 +10,10 @@
 //! from a filter.
 //!
 //! Line shape:
-//!   {"channel":"satan_audit_inbox","payload":"42"}\n
+//!
+//! ```text
+//! {"channel":"satan_audit_inbox","payload":"42"}
+//! ```
 //!
 //! Lifecycle: runs until SIGTERM / SIGINT. Exits 0 on signal, non-zero
 //! on listener error (caller restarts).
@@ -23,6 +26,12 @@ use tokio::signal::unix::{SignalKind, signal};
 
 use crate::{Error, Result};
 
+/// Line-delimited JSON to stdout; runs until SIGTERM/SIGINT.
+///
+/// # Errors
+///
+/// Returns an error if no channels provided, LISTEN setup fails, or
+/// stdout write/flush fails. Exits 0 on signal.
 pub async fn run(pool: PgPool, channels: &[String]) -> Result<()> {
     if channels.is_empty() {
         return Err(Error::InvalidArgument(
@@ -52,8 +61,8 @@ pub async fn run(pool: PgPool, channels: &[String]) -> Result<()> {
                     serde_json::to_string(n.payload())?,
                 );
                 let mut h = stdout.lock();
-                h.write_all(line.as_bytes()).map_err(io_to_err)?;
-                h.flush().map_err(io_to_err)?;
+                h.write_all(line.as_bytes()).map_err(|e| io_to_err(&e))?;
+                h.flush().map_err(|e| io_to_err(&e))?;
             }
             _ = term.recv() => { tracing::info!("SIGTERM"); break; }
             _ = intr.recv() => { tracing::info!("SIGINT"); break; }
@@ -62,6 +71,6 @@ pub async fn run(pool: PgPool, channels: &[String]) -> Result<()> {
     Ok(())
 }
 
-fn io_to_err(e: std::io::Error) -> Error {
+fn io_to_err(e: &std::io::Error) -> Error {
     Error::InvalidArgument(format!("stdout write: {e}"))
 }

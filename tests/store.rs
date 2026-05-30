@@ -2,7 +2,13 @@
 //!
 //! Requires Postgres reachable at `$DATABASE_URL`. The harness migrates on
 //! first connect; subsequent tests share the pool.
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![expect(
+    clippy::unwrap_used,
+    clippy::tests_outside_test_module,
+    clippy::indexing_slicing,
+    clippy::panic,
+    reason = "integration test crate: unwrap/panic for fixtures, tests at crate level, index known JSON keys"
+)]
 
 mod common;
 
@@ -285,6 +291,11 @@ async fn prior_event_lookup_filters_by_intervention_and_name() {
         let ev = EventInsert {
             run_id: run_id.clone(),
             seq: counter.next(),
+            #[expect(
+                clippy::as_conversions,
+                clippy::cast_possible_wrap,
+                reason = "test fixture: loop counter fits in i64"
+            )]
             ts: base_ts + Duration::milliseconds(i as i64),
             scope: Scope::Global,
             name,
@@ -528,10 +539,10 @@ async fn rebuild_default_skips_disabled_events() {
 
     // --include-disabled mode replays disabled too.
     rebuild_projection(&pool, true).await.unwrap();
-    let (value, _) = common::select_raw(&pool, &scope, "doubt").await.unwrap();
+    let (value2, _) = common::select_raw(&pool, &scope, "doubt").await.unwrap();
     assert!(
-        (value - 0.50).abs() < 1e-9,
-        "include-disabled rebuild must apply disabled events; got {value}"
+        (value2 - 0.50).abs() < 1e-9,
+        "include-disabled rebuild must apply disabled events; got {value2}"
     );
 }
 
@@ -649,7 +660,10 @@ async fn get_setting_bool_returns_default_when_missing() {
 // Helpers
 // ---------------------------------------------------------------------------
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "test helper: many-column event insert matches DB schema shape"
+)]
 async fn insert_raw_event(
     pool: &sqlx::PgPool,
     run_id: &str,

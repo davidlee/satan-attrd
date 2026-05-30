@@ -24,11 +24,17 @@ use crate::types::{AttributeName, Cap, Scope};
 /// Monotonic seq counter scoped to a single SATAN run.
 ///
 /// `next()` returns 1 on the first call, then 2, 3, ... The daemon allocates
-/// one Counter per `run_id` (in the LISTENer's per-run map). Resetting between
-/// runs is the caller's responsibility — Counter does not see run_id.
-#[derive(Debug, Default)]
+/// one Counter per `run_id` (in the `LISTENer`'s per-run map). Resetting between
+/// runs is the caller's responsibility — Counter does not see `run_id`.
+#[derive(Debug)]
 pub struct Counter {
     inner: AtomicI32,
+}
+
+impl Default for Counter {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Counter {
@@ -42,6 +48,10 @@ impl Counter {
     /// Allocate the next seq value. Returns 1, 2, 3, ... Wrapping at
     /// `i32::MAX` panics (a single SATAN run emitting >2B events is a bug,
     /// not a recoverable state).
+    ///
+    /// # Panics
+    ///
+    /// Panics on seq overflow within a single run (`i32::MAX` events).
     pub fn next(&self) -> i32 {
         let next = self.inner.fetch_add(1, Ordering::SeqCst).saturating_add(1);
         assert!(next > 0, "attribute-event seq overflow within a single run");
@@ -70,6 +80,34 @@ impl Counter {
 pub fn format_event_id(run_id: &str, seq: i32) -> String {
     format!("{run_id}.attr{seq:03}")
 }
+
+type AttributeLookupTuple = (
+    String,
+    String,
+    f64,
+    DateTime<Utc>,
+    Json<Value>,
+    Option<DateTime<Utc>>,
+);
+
+type EventQueryTuple = (
+    String,
+    DateTime<Utc>,
+    String,
+    i32,
+    String,
+    String,
+    f64,
+    f64,
+    f64,
+    String,
+    String,
+    Json<Value>,
+    Json<Value>,
+    bool,
+);
+
+type RebuildRowTuple = (String, String, f64, Json<Value>, DateTime<Utc>);
 
 // ---------------------------------------------------------------------------
 // Rows
@@ -259,14 +297,7 @@ pub async fn lookup_attribute(
     scope: Scope,
     name: AttributeName,
 ) -> Result<Option<AttributeRow>> {
-    let row: Option<(
-        String,
-        String,
-        f64,
-        DateTime<Utc>,
-        Json<Value>,
-        Option<DateTime<Utc>>,
-    )> = sqlx::query_as(
+    let row: Option<AttributeLookupTuple> = sqlx::query_as(
         "SELECT scope, name, value, updated_at, evidence_json, last_decay_at
          FROM satan_attributes
          WHERE scope = $1 AND name = $2",
@@ -277,9 +308,9 @@ pub async fn lookup_attribute(
     .await?;
 
     Ok(row.map(
-        |(scope, name, value, updated_at, ev, last_decay_at)| AttributeRow {
-            scope,
-            name,
+        |(r_scope, r_name, value, updated_at, ev, last_decay_at)| AttributeRow {
+            scope: r_scope,
+            name: r_name,
             value,
             updated_at,
             evidence_json: ev.0,
@@ -303,22 +334,7 @@ pub async fn lookup_prior_events_by_intervention(
     intervention_id: &str,
     name: AttributeName,
 ) -> Result<Vec<EventRow>> {
-    let rows: Vec<(
-        String,
-        DateTime<Utc>,
-        String,
-        i32,
-        String,
-        String,
-        f64,
-        f64,
-        f64,
-        String,
-        String,
-        Json<Value>,
-        Json<Value>,
-        bool,
-    )> = sqlx::query_as(
+    let rows: Vec<EventQueryTuple> = sqlx::query_as(
         "SELECT id, ts, run_id, seq, scope, name, old_value, new_value, delta,
                 source, reason, evidence_json, caps_applied, disabled
          FROM satan_attribute_events
@@ -340,7 +356,7 @@ pub async fn lookup_prior_events_by_intervention(
                 run_id,
                 seq,
                 scope,
-                name,
+                r_name,
                 old_value,
                 new_value,
                 delta,
@@ -355,7 +371,7 @@ pub async fn lookup_prior_events_by_intervention(
                 run_id,
                 seq,
                 scope,
-                name,
+                name: r_name,
                 old_value,
                 new_value,
                 delta,
@@ -449,7 +465,7 @@ pub async fn bump_last_decay_at(
 /// Highest `seq` already persisted under `run_id`, or `None` when no events
 /// exist for it. The decay scheduler calls this on each UTC-day rollover to
 /// resume its per-day `Counter` past any seq a prior daemon process wrote for
-/// the same `maintenance:<utc-day>` run_id — closing the restart-while-disabled
+/// the same `maintenance:<utc-day>` `run_id` — closing the restart-while-disabled
 /// `(run_id, seq)` collision (§17.8 / T-attr-2f).
 ///
 /// # Errors
@@ -513,7 +529,7 @@ pub async fn rebuild_projection(pool: &PgPool, include_disabled: bool) -> Result
     .await?;
 
     // Step 2 (§10.1 / §10.2): walk events in deterministic order, UPSERT.
-    let rows: Vec<(String, String, f64, Json<Value>, DateTime<Utc>)> = if include_disabled {
+    let rows: Vec<RebuildRowTuple> = if include_disabled {
         sqlx::query_as(
             "SELECT scope, name, new_value, evidence_json, ts
              FROM satan_attribute_events
@@ -584,7 +600,10 @@ pub fn outcome_evidence_json(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "test fixtures: index known JSON keys after schema checks"
+)]
 mod tests {
     use super::*;
 

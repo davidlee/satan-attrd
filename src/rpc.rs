@@ -8,7 +8,7 @@
 //!
 //! Accept path is silent (no reply row). On reject the broker writes
 //! `satan_audit_replies` + `pg_notify satan_audit_reply`; the run loop's
-//! reply LISTENer (in `main.rs`) handles those.
+//! reply `LISTENer` (in `main.rs`) handles those.
 
 use serde_json::Value;
 use sqlx::PgPool;
@@ -78,6 +78,11 @@ pub fn with_schema_version(mut payload: Value) -> Value {
 ///
 /// Missing field, non-string field, malformed `MAJOR.MINOR`, or major
 /// mismatch all reject; minor differences accept (forward compat).
+///
+/// # Errors
+///
+/// Returns `Err(reason)` if: `schema_version` is missing, is not a string,
+/// is malformed, or its major component does not match `PAYLOAD_SCHEMA_MAJOR`.
 pub fn check_schema_major(payload: &Value) -> std::result::Result<(), String> {
     let v = payload
         .get("schema_version")
@@ -91,7 +96,7 @@ pub fn check_schema_major(payload: &Value) -> std::result::Result<(), String> {
         .ok_or_else(|| format!("malformed schema_version: {s:?}"))?;
     let major: u32 = major_str
         .parse()
-        .map_err(|_| format!("malformed schema_version major: {s:?}"))?;
+        .map_err(|e| format!("malformed schema_version major: {s:?}: {e}"))?;
     if major != PAYLOAD_SCHEMA_MAJOR {
         return Err(format!(
             "schema_version major {major} does not match daemon major {PAYLOAD_SCHEMA_MAJOR}"
@@ -101,7 +106,11 @@ pub fn check_schema_major(payload: &Value) -> std::result::Result<(), String> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)] // tests assert on Err variant via unwrap_err
+#[expect(
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    reason = "test fixtures: unwrap_err on Err variant, index into known JSON keys"
+)]
 mod tests {
     use super::*;
     use serde_json::json;
