@@ -5,8 +5,17 @@
 //! - VT-no-prod: `shared_pool()` connects to a generated `satan_attrd_test_*`
 //!   database — never the database named by `DATABASE_URL`.
 //! - VT-sweep-gc: `sweep_stale()` drops an old idle stray DB and keeps a recent one.
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![expect(
+    clippy::expect_used,
+    clippy::tests_outside_test_module,
+    clippy::disallowed_methods,
+    reason = "integration test crate: expect in test fixtures, tests at crate level, DATABASE_URL env access is the harness's job"
+)]
 
+#[expect(
+    dead_code,
+    reason = "test helpers shared across crates; unused in this binary"
+)]
 mod common;
 
 use common::with_db;

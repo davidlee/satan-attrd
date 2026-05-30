@@ -74,9 +74,7 @@ impl LruCounterMap {
             }
             self.order.push_back(run_id.to_string());
         }
-        self.map
-            .entry(run_id.to_string())
-            .or_insert_with(Counter::new)
+        self.map.entry(run_id.to_string()).or_default()
     }
 
     #[must_use]
@@ -412,6 +410,10 @@ impl RunLoop {
     /// Drain any pending inbox + reply rows once (process the backlog that
     /// accumulated while the daemon was down), then loop on LISTEN. Returns
     /// only on a fatal error from the listeners.
+    ///
+    /// # Errors
+    ///
+    /// Returns a Sqlx error on database failure during LISTEN setup or drain.
     pub async fn run(mut self) -> Result<()> {
         let mut outcome_listener = PgListener::connect_with(&self.pool).await?;
         outcome_listener.listen(rpc::OUTCOME_INBOX_CHANNEL).await?;
@@ -443,6 +445,10 @@ impl RunLoop {
     /// Drain all currently-pending rows in `satan_outcome_inbox` once.
     /// Test + bootstrap entry point — production `run()` calls this once
     /// before falling into the `select!` LISTEN loop.
+    ///
+    /// # Errors
+    ///
+    /// Returns a Sqlx error on database failure.
     pub async fn drain_outcome_inbox(&mut self) -> Result<()> {
         let ids: Vec<(i32,)> = sqlx::query_as(
             "SELECT id FROM satan_outcome_inbox
@@ -461,6 +467,10 @@ impl RunLoop {
 
     /// Drain all pending `satan_audit_replies` rows once. Production
     /// `run()` calls this on startup; tests call it directly.
+    ///
+    /// # Errors
+    ///
+    /// Returns a Sqlx error on database failure.
     pub async fn drain_audit_replies(&mut self) -> Result<()> {
         let ids: Vec<(i32,)> =
             sqlx::query_as("SELECT inbox_id FROM satan_audit_replies ORDER BY inbox_id")
@@ -701,8 +711,8 @@ fn union_affected(a: OutcomeReason, b: OutcomeReason) -> Vec<AttributeName> {
     let mut names = Vec::with_capacity(8);
     let row_a = dispatcher::base_deltas(a);
     let row_b = dispatcher::base_deltas(b);
-    for (idx, name) in ATTR_ORDER.iter().enumerate() {
-        if row_a[idx] != 0.0 || row_b[idx] != 0.0 {
+    for (name, (da, db)) in ATTR_ORDER.iter().zip(row_a.iter().zip(row_b.iter())) {
+        if *da != 0.0 || *db != 0.0 {
             names.push(*name);
         }
     }
@@ -710,7 +720,11 @@ fn union_affected(a: OutcomeReason, b: OutcomeReason) -> Vec<AttributeName> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    reason = "test fixtures: unwrap on known-good values, index known JSON keys after schema_version assert"
+)]
 mod tests {
     use super::*;
 

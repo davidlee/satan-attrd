@@ -8,8 +8,21 @@
 //!     production scope by §3 design). Serialised via `DECAY_TEST_LOCK`
 //!     against parallel decay tests and the four `DECAY_TARGETS` global
 //!     rows are snapshot/restored around each test.
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![expect(
+    clippy::unwrap_used,
+    clippy::tests_outside_test_module,
+    clippy::indexing_slicing,
+    clippy::as_conversions,
+    clippy::cast_possible_wrap,
+    clippy::cast_possible_truncation,
+    clippy::clone_on_ref_ptr,
+    reason = "integration test crate: fixtures, tests at crate level, test-local index/convert patterns"
+)]
 
+#[expect(
+    dead_code,
+    reason = "test helpers shared across crates; unused in this binary"
+)]
 mod common;
 
 use std::sync::Arc;
@@ -298,7 +311,7 @@ async fn purge_test_decay_events(pool: &sqlx::PgPool, run_id: &str) {
         .unwrap();
 }
 
-/// Highest persisted `seq` for a run_id (`None` when no events) — mirrors
+/// Highest persisted `seq` for a `run_id` (`None` when no events) — mirrors
 /// `store::max_seq_for_run` so tests assert the counter-resume invariant
 /// against the DB directly.
 async fn max_seq(pool: &sqlx::PgPool, run_id: &str) -> Option<i32> {

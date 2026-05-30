@@ -15,6 +15,10 @@ pub trait Clock: Send + Sync {
 }
 
 #[derive(Debug, Default, Clone, Copy)]
+#[expect(
+    clippy::module_name_repetitions,
+    reason = "idiomatic name; distinct from trait"
+)]
 pub struct SystemClock;
 
 impl Clock for SystemClock {
@@ -28,6 +32,10 @@ impl Clock for SystemClock {
 /// integration tests link against the library crate as a separate binary
 /// and would not see `#[cfg(test)]`-gated items.
 #[derive(Debug, Clone)]
+#[expect(
+    clippy::module_name_repetitions,
+    reason = "idiomatic name; test-only clock"
+)]
 pub struct FakeClock {
     now: Arc<Mutex<DateTime<Utc>>>,
 }

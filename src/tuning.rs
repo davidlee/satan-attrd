@@ -82,10 +82,12 @@ pub const fn outcome_base_deltas(reason: OutcomeReason) -> [f64; 8] {
 pub const fn hippocampus_base_deltas(reason: HippocampusReason) -> [f64; 8] {
     //                            curio  frict  shame  doubt  hunger  susp   brood  meta
     match reason {
-        HippocampusReason::Written => [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -TINY, 0.0],
-        HippocampusReason::Overwritten => [0.0, 0.0, -TINY, 0.0, 0.0, 0.0, -TINY, 0.0],
-        HippocampusReason::Deleted => [0.0, 0.0, -TINY, 0.0, 0.0, 0.0, -TINY, 0.0],
-        HippocampusReason::Renamed => [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -TINY, 0.0],
+        HippocampusReason::Written | HippocampusReason::Renamed => {
+            [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -TINY, 0.0]
+        }
+        HippocampusReason::Overwritten | HippocampusReason::Deleted => {
+            [0.0, 0.0, -TINY, 0.0, 0.0, 0.0, -TINY, 0.0]
+        }
         HippocampusReason::Searched => [0.0, 0.0, 0.0, 0.0, 0.0, TINY, 0.0, 0.0],
         HippocampusReason::TraceMarked => [-TINY, 0.0, 0.0, 0.0, 0.0, 0.0, -TINY, 0.0],
     }

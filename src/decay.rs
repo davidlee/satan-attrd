@@ -23,7 +23,7 @@
 //! Per §4.2:
 //!   * `run_id` is `maintenance:<YYYY-MM-DD>` (UTC).
 //!   * `seq` is allocated from a per-UTC-day `Counter` rotated on UTC day
-//!     roll, keeping seq monotonic within each run_id without cross-cutting
+//!     roll, keeping seq monotonic within each `run_id` without cross-cutting
 //!     the run-loop's LRU.
 
 use std::collections::HashMap;
@@ -55,8 +55,8 @@ fn is_run_seq_collision(err: &Error) -> bool {
         Error::Sqlx(sqlx::Error::Database(db))
             if matches!(
                 db.constraint(),
-                Some("satan_attribute_events_pkey")
-                    | Some("satan_attribute_events_run_id_seq_key")
+                Some("satan_attribute_events_pkey"
+                    | "satan_attribute_events_run_id_seq_key")
             )
     )
 }
@@ -71,7 +71,7 @@ pub const DECAY_TARGETS: [AttributeName; 4] = [
     AttributeName::Metamorphosis,
 ];
 
-/// The synthetic per-UTC-day run_id for idle-decay events (§4.2). One per
+/// The synthetic per-UTC-day `run_id` for idle-decay events (§4.2). One per
 /// UTC calendar day; `seq` is allocated from the day's `Counter`.
 fn maintenance_run_id(day: NaiveDate) -> String {
     format!("maintenance:{}", day.format("%Y-%m-%d"))
@@ -83,6 +83,10 @@ fn maintenance_run_id(day: NaiveDate) -> String {
 pub const DECAY_TICK_INTERVAL: Duration = Duration::from_secs(3600);
 
 /// Staleness threshold — a row fires when `(now - last_decay_at) ≥ 24h`.
+#[expect(
+    clippy::module_name_repetitions,
+    reason = "idiomatic name; threshold specific to decay module"
+)]
 #[must_use]
 pub fn decay_threshold() -> chrono::Duration {
     chrono::Duration::hours(24)
@@ -100,7 +104,7 @@ pub struct DueRow {
 }
 
 /// Per-UTC-day Counter state. The (day, counter) pair rotates whenever
-/// `tick` observes a date roll, so each `maintenance:<utc-day>` run_id
+/// `tick` observes a date roll, so each `maintenance:<utc-day>` `run_id`
 /// gets monotonic `seq` from zero. Held under a `std::sync::Mutex` —
 /// the critical section is the rotation check + Arc clone, never held
 /// across `.await`.
@@ -111,6 +115,10 @@ struct DayCounterState {
 }
 
 #[derive(Debug)]
+#[expect(
+    clippy::module_name_repetitions,
+    reason = "idiomatic name; decay-specific scheduler"
+)]
 pub struct DecayScheduler<C: Clock> {
     pool: PgPool,
     clock: Arc<C>,
@@ -186,7 +194,7 @@ impl<C: Clock + 'static> DecayScheduler<C> {
         Ok(due)
     }
 
-    /// Read current values for all DECAY_TARGETS at `self.scope`. Used
+    /// Read current values for all `DECAY_TARGETS` at `self.scope`. Used
     /// to seed `MaintenanceInput.projection` + `Snapshot` once per tick
     /// (snapshot is §6.3 pre-dispatch; consistency within the tick is the
     /// guarantee — concurrent UPSERTs between this read and the apply
@@ -213,7 +221,7 @@ impl<C: Clock + 'static> DecayScheduler<C> {
     /// Acquire (or rotate) the per-UTC-day Counter. On the fast path — still
     /// the same UTC day — returns the cached counter under a brief lock. On a
     /// date roll (including the first tick after construction) the counter
-    /// resumes from `MAX(seq)+1` for that day's run_id, so a mid-day daemon
+    /// resumes from `MAX(seq)+1` for that day's `run_id`, so a mid-day daemon
     /// restart while disabled no longer re-emits persisted `(run_id, seq)`
     /// pairs (§17.8 / T-attr-2f). The resume query runs before the lock; the
     /// sync critical section (compare day, swap, clone) is never held across
@@ -248,7 +256,7 @@ impl<C: Clock + 'static> DecayScheduler<C> {
 
     /// One scheduler tick. Reads `attribute_updates_enabled`, identifies
     /// due rows, dispatches one synthetic `(maintenance, idle_decay)`
-    /// event per row, applies the EventInsert pattern (insert_event →
+    /// event per row, applies the `EventInsert` pattern (`insert_event` →
     /// conditional UPSERT → audit RPC → conditional `last_decay_at` bump).
     ///
     /// Returns the number of due rows processed (0 when nothing was due;
@@ -292,7 +300,7 @@ impl<C: Clock + 'static> DecayScheduler<C> {
                 target: row.name,
                 days_since_last: row.days_since_last.unwrap_or(0).max(0),
                 enabled,
-                snapshot: snapshot.clone(),
+                snapshot,
                 projection: projection.clone(),
             };
             let events = dispatch_maintenance(&input, &counter);

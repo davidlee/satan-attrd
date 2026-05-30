@@ -5,6 +5,9 @@ edition = "2024"
 rust-version = "1.85"
 description = "SATAN attribute layer daemon — outcome-driven attribute state + event log"
 license = "MIT"
+repository = "https://github.com/davidlee/satan-attrd"
+keywords = ["satan", "attributes", "daemon"]
+categories = ["development-tools"]
 
 [lib]
 name = "satan_attrd"

@@ -19,8 +19,23 @@ pub mod store;
 pub mod tuning;
 pub mod types;
 
+#[expect(
+    clippy::useless_attribute,
+    clippy::pub_use,
+    reason = "crate facade: deliberate public-API re-export"
+)]
 pub use clock::{Clock, FakeClock, SystemClock};
+#[expect(
+    clippy::useless_attribute,
+    clippy::pub_use,
+    reason = "crate facade: deliberate public-API re-export"
+)]
 pub use decay::{DECAY_TARGETS, DECAY_TICK_INTERVAL, DecayScheduler, DueRow, decay_threshold};
+#[expect(
+    clippy::useless_attribute,
+    clippy::pub_use,
+    reason = "crate facade: deliberate public-API re-export"
+)]
 pub use dispatcher::{
     ATTR_ORDER, AttributePlan, Confidence, CueDimensions, HippocampusInput, MaintenanceInput,
     OutcomeInput, RevisionInput, SensorInput, Snapshot, affected, base_deltas,
@@ -28,12 +43,27 @@ pub use dispatcher::{
     dispatch_sensor, gather_prior_actuals, hippocampus_base_deltas, plan_for, sensor_base_deltas,
     weight_delta,
 };
+#[expect(
+    clippy::useless_attribute,
+    clippy::pub_use,
+    reason = "crate facade: deliberate public-API re-export"
+)]
 pub use error::{Error, Result};
+#[expect(
+    clippy::useless_attribute,
+    clippy::pub_use,
+    reason = "crate facade: deliberate public-API re-export"
+)]
 pub use store::{
     AttributeRow, Counter, EventInsert, EventRow, bump_last_decay_at, format_event_id,
     get_setting_bool, insert_event, lookup_attribute, lookup_prior_events_by_intervention,
     outcome_evidence_json, rebuild_projection, set_setting_bool, upsert_attribute,
 };
+#[expect(
+    clippy::useless_attribute,
+    clippy::pub_use,
+    reason = "crate facade: deliberate public-API re-export"
+)]
 pub use types::{
     AttributeName, Cap, HippocampusReason, MaintenanceReason, OutcomeReason, Scope, SensorReason,
     Source,

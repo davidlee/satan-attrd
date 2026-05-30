@@ -221,7 +221,7 @@ pub struct RevisionInput {
     pub prior_classification: OutcomeReason,
     pub prior_actuals: HashMap<AttributeName, f64>,
     /// The broker's `:revises` pointer (per outcome-semantics §9) — opaque
-    /// to the daemon; passed through into evidence_json.
+    /// to the daemon; passed through into `evidence_json`.
     pub revises: String,
 }
 
@@ -237,8 +237,7 @@ pub struct RevisionInput {
 pub fn dispatch_outcome(input: &OutcomeInput, counter: &Counter) -> Vec<EventInsert> {
     let row = base_deltas(input.classification);
     let mut out = Vec::new();
-    for (idx, name) in ATTR_ORDER.iter().enumerate() {
-        let base = row[idx];
+    for (name, &base) in ATTR_ORDER.iter().zip(row.iter()) {
         if base == 0.0 {
             continue;
         }
@@ -268,9 +267,9 @@ pub fn dispatch_revision(input: &RevisionInput, counter: &Counter) -> Vec<EventI
     let new_row = base_deltas(base.classification);
     let prior_row = base_deltas(input.prior_classification);
     let mut out = Vec::new();
-    for (idx, name) in ATTR_ORDER.iter().enumerate() {
-        let new_base = new_row[idx];
-        let prior_base = prior_row[idx];
+    for (name, (&new_base, &prior_base)) in
+        ATTR_ORDER.iter().zip(new_row.iter().zip(prior_row.iter()))
+    {
         // Union of affected attrs: any attribute whose base is non-zero in
         // either the prior or the new classification.
         if new_base == 0.0 && prior_base == 0.0 {
@@ -310,7 +309,7 @@ pub const fn hippocampus_base_deltas(reason: HippocampusReason) -> [f64; 8] {
     tuning::hippocampus_base_deltas(reason)
 }
 
-/// Inputs to a hippocampus dispatch. No confidence, intervention_id, or
+/// Inputs to a hippocampus dispatch. No confidence, `intervention_id`, or
 /// cue dimensions — hippocampus actions are binary (§6H.3).
 #[derive(Debug, Clone)]
 pub struct HippocampusInput {
@@ -329,8 +328,7 @@ pub struct HippocampusInput {
 pub fn dispatch_hippocampus(input: &HippocampusInput, counter: &Counter) -> Vec<EventInsert> {
     let row = hippocampus_base_deltas(input.reason);
     let mut out = Vec::new();
-    for (idx, name) in ATTR_ORDER.iter().enumerate() {
-        let base = row[idx];
+    for (name, &base) in ATTR_ORDER.iter().zip(row.iter()) {
         if base == 0.0 {
             continue;
         }
@@ -389,8 +387,7 @@ pub struct SensorInput {
 pub fn dispatch_sensor(input: &SensorInput, counter: &Counter) -> Vec<EventInsert> {
     let row = sensor_base_deltas(input.reason);
     let mut out = Vec::new();
-    for (idx, name) in ATTR_ORDER.iter().enumerate() {
-        let base = row[idx];
+    for (name, &base) in ATTR_ORDER.iter().zip(row.iter()) {
         if base == 0.0 {
             continue;
         }
@@ -450,6 +447,10 @@ pub struct MaintenanceInput {
 /// `input.target` (contract violation — caller must seed it).
 #[must_use]
 pub fn dispatch_maintenance(input: &MaintenanceInput, counter: &Counter) -> Vec<EventInsert> {
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "contract §17.8: caller seeds projection[target]; missing key is a contract violation and the panic is the intended signal"
+    )]
     let old_value = input.projection[&input.target];
     let new_value_raw = old_value + DECAY_DELTA;
     // Decay delta is negative and values are already ≤ 1.0, so only the
@@ -499,8 +500,10 @@ fn outcome_evidence(input: &OutcomeInput, revision: Option<RevisionEvidence>) ->
         "related_trace_ids": input.cue.related_trace_ids,
     });
     if let Some(rev) = revision {
-        ev["revises"] = Value::String(rev.revises);
-        ev["prior_actual"] = json!(rev.prior_actual);
+        if let Some(obj) = ev.as_object_mut() {
+            obj.insert("revises".into(), Value::String(rev.revises));
+            obj.insert("prior_actual".into(), json!(rev.prior_actual));
+        }
     }
     ev
 }
@@ -565,7 +568,12 @@ pub async fn gather_prior_actuals(
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    clippy::float_cmp,
+    reason = "test fixtures: unwrap on known-good values, index result vecs after length asserts, compare exact table constants; failures should surface loudly"
+)]
 mod tests {
     use super::*;
 
@@ -617,9 +625,9 @@ mod tests {
         // neutral → nothing.
         assert_eq!(affected(OutcomeReason::Neutral).len(), 0);
         // harmful → friction, shame, doubt, metamorphosis (4 non-zero).
-        let aff = affected(OutcomeReason::Harmful);
-        assert_eq!(aff.len(), 4);
-        assert!(aff.contains(&AttributeName::Metamorphosis));
+        let aff2 = affected(OutcomeReason::Harmful);
+        assert_eq!(aff2.len(), 4);
+        assert!(aff2.contains(&AttributeName::Metamorphosis));
     }
 
     #[test]
@@ -667,9 +675,9 @@ mod tests {
         assert!(close(plan.new_value, 0.2));
         assert!(plan.caps_applied.contains(&Cap::FrictionCap));
         // Negative friction delta always passes.
-        let plan = plan_for(AttributeName::Friction, -0.10, 0.50, snap);
-        assert!(close(plan.new_value, 0.40));
-        assert!(!plan.caps_applied.contains(&Cap::FrictionCap));
+        let plan2 = plan_for(AttributeName::Friction, -0.10, 0.50, snap);
+        assert!(close(plan2.new_value, 0.40));
+        assert!(!plan2.caps_applied.contains(&Cap::FrictionCap));
     }
 
     #[test]
