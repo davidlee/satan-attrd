@@ -2,6 +2,7 @@
 /result
 /.direnv
 *.log
+.envrc
 
 /supabase/.*
 *.local.md
