@@ -1,0 +1,12 @@
+policies:
+  POL-001:
+    id: POL-001
+    title: 'POL-001: Rust lint policy for agentic development'
+    status: required
+    path: .spec-driver/policies/POL-001-rust_lint_policy_for_agentic_development.md
+    summary: 'Strict Rust/Clippy lints, zero-warning tree. Suppressions must be narrow, carry a reason, and serve better code. "Pre-existing" is not an exemption.'
+    created: '2026-05-31'
+    updated: '2026-05-31'
+    reviewed: '2026-05-31'
+    owners:
+    - David Lee

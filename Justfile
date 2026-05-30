@@ -18,13 +18,9 @@ test-unit:
 test-integration:
   cargo test --test '*'
 
-# Lint
+# Lint with zero tolerance (policy lives in Cargo.toml [lints] + clippy.toml).
 lint:
-  cargo clippy --all-targets --all-features -- \
-  -D clippy::unwrap_used \
-  -D clippy::expect_used \
-  -W clippy::pedantic \
-  -A clippy::too_many_lines
+  cargo clippy --all-targets --all-features -- -D warnings
 
 # Format check
 format:

@@ -1,3 +1,7 @@
+@.spec-driver/agents/boot.md
+
+@.spec-driver/AGENTS.md
+
 # AGENTS.md — satan-attrd orientation
 
 This daemon is a SATAN-orbit module extracted out of

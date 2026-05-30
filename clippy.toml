@@ -1,0 +1,13 @@
+# clippy.toml
+
+avoid-breaking-exported-api = false
+
+disallowed-methods = [
+  { path = "std::env::var", reason = "Use typed configuration loading instead" },
+  { path = "std::env::set_var", reason = "Global process mutation is test-hostile" },
+  { path = "std::process::exit", reason = "Return an error from main/application boundary instead" },
+]
+
+# NB: forgettable also bans HashMap/HashSet (BTreeMap determinism). satan-attrd
+# uses HashMap intentionally for the Counter / projection maps, so that ban is
+# omitted here.
