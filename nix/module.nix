@@ -83,6 +83,10 @@ in {
           ExecStart = "${cfg.package}/bin/satan-attrd run";
           Restart = "on-failure";
           RestartSec = "5s";
+          # Don't compete with interactive work — the daemon is a
+          # background consumer that can yield.
+          Nice = 15;
+          IOSchedulingClass = "idle";
         };
       Install.WantedBy = ["default.target"];
     };

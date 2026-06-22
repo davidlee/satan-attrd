@@ -446,6 +446,11 @@ impl RunLoop {
     /// Test + bootstrap entry point — production `run()` calls this once
     /// before falling into the `select!` LISTEN loop.
     ///
+    /// Yields between rows so a large post-restart backlog doesn't saturate
+    /// the CPU/IO scheduler in a tight loop (the daemon runs single-threaded
+    /// with low nice/IO priority, but a long synchronous burst still queues
+    /// work faster than the scheduler can deprioritise it).
+    ///
     /// # Errors
     ///
     /// Returns a Sqlx error on database failure.
@@ -457,9 +462,15 @@ impl RunLoop {
         )
         .fetch_all(&self.pool)
         .await?;
-        for (id,) in ids {
+        for (i, (id,)) in ids.into_iter().enumerate() {
             if let Err(e) = self.process_outcome_row(id).await {
                 tracing::error!(?e, id, "outcome dispatch failed (drain)");
+            }
+            // Yield every 8 rows so a large backlog doesn't starve the
+            // OS scheduler — in a current_thread runtime this returns
+            // control to the tokio event loop briefly.
+            if i % 8 == 0 {
+                tokio::task::yield_now().await;
             }
         }
         Ok(())
