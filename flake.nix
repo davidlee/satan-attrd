@@ -5,8 +5,7 @@
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-parts.url = "github:hercules-ci/flake-parts";
     devshell.url = "github:numtide/devshell";
-    pub.url = "path:/home/david/flakes/pub";
-    llm-agents.url = "github:numtide/llm-agents.nix";
+    pub.url = "github:davidlee/nix-config?dir=flakes/pub";
     spec-driver.url = "github:davidlee/spec-driver";
     rust-overlay.url = "github:oxalica/rust-overlay";
   };
@@ -42,7 +41,7 @@
 
         jailLib =
           if isLinux
-          then inputs.pub.lib.${system}.mkJailedAgents {inherit (inputs) llm-agents;}
+          then inputs.pub.lib.${system}.mkJailedAgents {}
           else {};
 
         spec-driver-pkg = spec-driver.packages.${system}.default;
@@ -57,7 +56,7 @@
             stdenv.cc # cc/ld on PATH (linker for cargo build)
             stdenv.cc.cc.lib
             supabase-cli
-            codex
+            (jailLib.unjailed.codex or codex)
           ]
           ++ [spec-driver-pkg];
 
