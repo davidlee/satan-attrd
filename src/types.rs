@@ -310,6 +310,8 @@ pub enum SensorReason {
     SegmentBacklog,
     TypingActive,
     TypingIdle,
+    AskSuppressed,
+    AskUncorrelated,
 }
 
 impl SensorReason {
@@ -319,6 +321,8 @@ impl SensorReason {
             Self::SegmentBacklog => "segment_backlog",
             Self::TypingActive => "typing_active",
             Self::TypingIdle => "typing_idle",
+            Self::AskSuppressed => "ask_suppressed",
+            Self::AskUncorrelated => "ask_uncorrelated",
         }
     }
 }
@@ -336,6 +340,8 @@ impl FromStr for SensorReason {
             "segment_backlog" => Ok(Self::SegmentBacklog),
             "typing_active" => Ok(Self::TypingActive),
             "typing_idle" => Ok(Self::TypingIdle),
+            "ask_suppressed" => Ok(Self::AskSuppressed),
+            "ask_uncorrelated" => Ok(Self::AskUncorrelated),
             other => Err(crate::error::Error::InvalidReason {
                 source_name: Source::Sensor.as_str().to_string(),
                 reason: other.to_string(),
@@ -487,6 +493,8 @@ mod tests {
             SensorReason::SegmentBacklog,
             SensorReason::TypingActive,
             SensorReason::TypingIdle,
+            SensorReason::AskSuppressed,
+            SensorReason::AskUncorrelated,
         ] {
             assert_eq!(SensorReason::from_str(r.as_str()).unwrap(), r);
         }

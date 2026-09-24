@@ -1081,6 +1081,42 @@ mod tests {
             sensor_base_deltas(SensorReason::TypingIdle),
             [0.0, 0.0, 0.0, 0.0, 0.025, 0.0, 0.0, 0.0]
         );
+        assert_eq!(
+            sensor_base_deltas(SensorReason::AskSuppressed),
+            [0.025, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.025]
+        );
+        assert_eq!(
+            sensor_base_deltas(SensorReason::AskUncorrelated),
+            [0.0, 0.0, 0.0, 0.025, 0.0, 0.0, 0.0, 0.025]
+        );
+    }
+
+    #[test]
+    fn dispatch_sensor_ask_suppressed_affects_curiosity_and_metamorphosis() {
+        let input = sensor_input(SensorReason::AskSuppressed);
+        let counter = Counter::new();
+        let events = dispatch_sensor(&input, &counter);
+        assert_eq!(events.len(), 2);
+        let names: Vec<_> = events.iter().map(|e| e.name).collect();
+        assert!(names.contains(&AttributeName::Curiosity));
+        assert!(names.contains(&AttributeName::Metamorphosis));
+        for ev in &events {
+            assert!(close(ev.delta(), 0.025));
+        }
+    }
+
+    #[test]
+    fn dispatch_sensor_ask_uncorrelated_affects_doubt_and_metamorphosis() {
+        let input = sensor_input(SensorReason::AskUncorrelated);
+        let counter = Counter::new();
+        let events = dispatch_sensor(&input, &counter);
+        assert_eq!(events.len(), 2);
+        let names: Vec<_> = events.iter().map(|e| e.name).collect();
+        assert!(names.contains(&AttributeName::Doubt));
+        assert!(names.contains(&AttributeName::Metamorphosis));
+        for ev in &events {
+            assert!(close(ev.delta(), 0.025));
+        }
     }
 
     #[test]

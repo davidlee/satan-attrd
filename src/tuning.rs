@@ -106,5 +106,7 @@ pub const fn sensor_base_deltas(reason: SensorReason) -> [f64; 8] {
         SensorReason::SegmentBacklog => [SMALL, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
         SensorReason::TypingActive => [0.0, 0.0, 0.0, 0.0, SMALL, 0.0, 0.0, 0.0],
         SensorReason::TypingIdle => [0.0, 0.0, 0.0, 0.0, TINY, 0.0, 0.0, 0.0],
+        SensorReason::AskSuppressed => [TINY, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, TINY],
+        SensorReason::AskUncorrelated => [0.0, 0.0, 0.0, TINY, 0.0, 0.0, 0.0, TINY],
     }
 }
