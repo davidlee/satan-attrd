@@ -11,7 +11,7 @@
 #       imports = [ inputs.satan-attrd.homeManagerModules.default ];
 #       services.satan-attrd = {
 #         enable = true;
-#         package = inputs.satan-attrd.packages.${pkgs.system}.satan-attrd;
+#         package = inputs.satan-attrd.packages.${pkgs.stdenv.hostPlatform.system}.satan-attrd;
 #       };
 #     };
 #   }
