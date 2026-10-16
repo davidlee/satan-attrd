@@ -46,19 +46,21 @@
 
         spec-driver-pkg = spec-driver.packages.${system}.default;
 
-        projectPkgs = with pkgs;
-          [
-            just
-            postgresql_18
+        # The tool set minus the agents. Exported as `packages.dev-tools` for
+        # consumers that confine differently — the oubliette microvm capsule's
+        # `toolsPackage`, where the agents come from the capsule.
+        devToolPkgs = with pkgs; [
+          just
+          postgresql_18
 
-            rust-bin.stable.latest.default
+          rust-bin.stable.latest.default
 
-            stdenv.cc # cc/ld on PATH (linker for cargo build)
-            stdenv.cc.cc.lib
-            supabase-cli
-            (jailLib.unjailed.codex or codex)
-          ]
-          ++ [spec-driver-pkg];
+          stdenv.cc # cc/ld on PATH (linker for cargo build)
+          stdenv.cc.cc.lib
+          supabase-cli
+          spec-driver-pkg
+        ];
+        projectPkgs = devToolPkgs ++ [(jailLib.unjailed.codex or pkgs.codex)];
 
         # Environment forwarded into jail via bwrap --setenv
         jailEnvOptions = with jailLib.combinators; [
@@ -160,6 +162,13 @@
           // {
             inherit satan-attrd;
             default = satan-attrd;
+            # The devshell's tool set as one closure, so the VM and the devshell
+            # can't drift.
+            dev-tools = pkgs.buildEnv {
+              name = "satan-attrd-dev-tools";
+              paths = devToolPkgs;
+              ignoreCollisions = true;
+            };
           };
 
         devshells.default = {
