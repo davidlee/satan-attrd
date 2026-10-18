@@ -65,13 +65,17 @@
         # Environment forwarded into jail via bwrap --setenv
         jailEnvOptions = with jailLib.combinators; [
           (try-fwd-env "DATABASE_URL")
-          (try-fwd-env "OPENROUTER_API_KEY")
           (try-fwd-env "DOCKER_HOST")
           (try-readwrite "/run/user/1000/docker.sock")
           (set-env "LD_LIBRARY_PATH" "${lib.makeLibraryPath [pkgs.stdenv.cc.cc.lib]}")
         ];
 
         workspaceDeps = ["/home/david/.emacs.d/"];
+
+        # Every jail reaches models through the local LLM gateway with the
+        # shared `pi` key (~/.config/llm-gateway/keys/pi); no provider key
+        # enters a jail.
+        gateway = jailLib.gatewayClient "pi";
 
         jailPkgs = lib.optionalAttrs isLinux {
           jailed-pi = jailLib.makeJailedPi {
@@ -81,14 +85,14 @@
             maxSubagentDepth = 2;
             extraPkgs = projectPkgs;
             extraOptions = jailEnvOptions;
-            inherit workspaceDeps;
+            inherit gateway workspaceDeps;
           };
           jailed-pi-research = jailLib.makeJailedPi {
             name = "pi-research";
             profile = "research";
             extraPkgs = projectPkgs;
             extraOptions = jailEnvOptions;
-            inherit workspaceDeps;
+            inherit gateway workspaceDeps;
           };
           # jailed-opencode = jailLib.makeJailedOpencode {
           #   profile = "specDev";
@@ -100,13 +104,13 @@
             profile = "specDev";
             extraPkgs = projectPkgs;
             extraOptions = jailEnvOptions;
-            inherit workspaceDeps;
+            inherit gateway workspaceDeps;
           };
           jailed-codex = jailLib.makeJailedCodex {
             profile = "specDev";
             extraPkgs = projectPkgs;
             extraOptions = jailEnvOptions;
-            inherit workspaceDeps;
+            inherit gateway workspaceDeps;
           };
           #jailed-gemini = jailLib.makeJailedGemini {
           #  profile = "specDev";
