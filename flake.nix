@@ -5,7 +5,7 @@
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-parts.url = "github:hercules-ci/flake-parts";
     devshell.url = "github:numtide/devshell";
-    pub.url = "github:davidlee/nix-config?dir=flakes/pub";
+    agents.url = "github:davidlee/nix-config?dir=flakes/agents";
     spec-driver.url = "github:davidlee/spec-driver";
     rust-overlay.url = "github:oxalica/rust-overlay";
   };
@@ -41,7 +41,7 @@
 
         jailLib =
           if isLinux
-          then inputs.pub.lib.${system}.mkJailedAgents {}
+          then inputs.agents.lib.${system}.mkJailedAgents {}
           else {};
 
         spec-driver-pkg = spec-driver.packages.${system}.default;
