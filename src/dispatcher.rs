@@ -1082,6 +1082,10 @@ mod tests {
             [0.0, 0.0, 0.0, 0.0, 0.025, 0.0, 0.0, 0.0]
         );
         assert_eq!(
+            sensor_base_deltas(SensorReason::Reading),
+            [0.0, 0.0, 0.0, 0.0, 0.025, 0.0, 0.0, 0.0]
+        );
+        assert_eq!(
             sensor_base_deltas(SensorReason::AskSuppressed),
             [0.025, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.025]
         );
@@ -1149,6 +1153,16 @@ mod tests {
     #[test]
     fn dispatch_sensor_typing_idle_affects_only_hunger() {
         let input = sensor_input(SensorReason::TypingIdle);
+        let counter = Counter::new();
+        let events = dispatch_sensor(&input, &counter);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].name, AttributeName::Hunger);
+        assert!(close(events[0].delta(), 0.025));
+    }
+
+    #[test]
+    fn dispatch_sensor_reading_affects_only_hunger() {
+        let input = sensor_input(SensorReason::Reading);
         let counter = Counter::new();
         let events = dispatch_sensor(&input, &counter);
         assert_eq!(events.len(), 1);

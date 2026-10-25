@@ -310,6 +310,7 @@ pub enum SensorReason {
     SegmentBacklog,
     TypingActive,
     TypingIdle,
+    Reading,
     AskSuppressed,
     AskUncorrelated,
 }
@@ -321,6 +322,7 @@ impl SensorReason {
             Self::SegmentBacklog => "segment_backlog",
             Self::TypingActive => "typing_active",
             Self::TypingIdle => "typing_idle",
+            Self::Reading => "reading",
             Self::AskSuppressed => "ask_suppressed",
             Self::AskUncorrelated => "ask_uncorrelated",
         }
@@ -340,6 +342,7 @@ impl FromStr for SensorReason {
             "segment_backlog" => Ok(Self::SegmentBacklog),
             "typing_active" => Ok(Self::TypingActive),
             "typing_idle" => Ok(Self::TypingIdle),
+            "reading" => Ok(Self::Reading),
             "ask_suppressed" => Ok(Self::AskSuppressed),
             "ask_uncorrelated" => Ok(Self::AskUncorrelated),
             other => Err(crate::error::Error::InvalidReason {
@@ -493,6 +496,7 @@ mod tests {
             SensorReason::SegmentBacklog,
             SensorReason::TypingActive,
             SensorReason::TypingIdle,
+            SensorReason::Reading,
             SensorReason::AskSuppressed,
             SensorReason::AskUncorrelated,
         ] {
