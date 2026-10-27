@@ -73,7 +73,7 @@
           (set-env "LD_LIBRARY_PATH" "${lib.makeLibraryPath [pkgs.stdenv.cc.cc.lib]}")
         ];
 
-        workspaceDeps = ["/home/david/.emacs.d/"];
+        workspaceDeps = ["/home/david/.config/emacs/"];
 
         # Every jail reaches models through the local LLM gateway with the
         # shared `pi` key (~/.config/llm-gateway/keys/pi); no provider key
