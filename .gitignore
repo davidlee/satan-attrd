@@ -17,3 +17,6 @@
 .*cache*
 .spec-driver/run/
 .pi/APPEND_SYSTEM.md
+
+# quotient forms: links into the nix store, rebuilt by `just quotient-forms`
+/.quotient/

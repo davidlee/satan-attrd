@@ -6,6 +6,16 @@ export DATABASE_URL := "postgresql://postgres:postgres@127.0.0.1:54322/postgres"
 
 default: check
 
+# Build this root's quotient forms and link them where quotient looks
+# (.quotient/forms/<capability>). A rebuild that changes a form needs a fresh
+# `quotient allow`.
+quotient-forms:
+    mkdir -p .quotient/forms
+    nix build -o .quotient/result-read .#quotient-read
+    nix build -o .quotient/result-write .#quotient-write
+    ln -sfn "$(readlink -f .quotient/result-read)/bin/quotient-read" .quotient/forms/read
+    ln -sfn "$(readlink -f .quotient/result-write)/bin/quotient-write" .quotient/forms/write
+
 # Full gate: lint + format + test
 check: lint format test
 
