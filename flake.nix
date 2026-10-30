@@ -101,12 +101,6 @@
             extraOptions = jailEnvOptions;
             inherit gateway workspaceDeps;
           };
-          # jailed-opencode = jailLib.makeJailedOpencode {
-          #   profile = "specDev";
-          #   extraPkgs = projectPkgs;
-          #   extraOptions = jailEnvOptions;
-          #   inherit workspaceDeps;
-          # };
           jailed-claude = jailLib.makeJailedClaude {
             profile = "specDev";
             extraPkgs = projectPkgs;
@@ -119,13 +113,13 @@
             extraOptions = jailEnvOptions;
             inherit gateway workspaceDeps;
           };
-          #jailed-gemini = jailLib.makeJailedGemini {
-          #  profile = "specDev";
-          #  extraPkgs = projectPkgs;
-          #  extraOptions = jailEnvOptions;
-          #  inherit workspaceDeps;
-          #};
-          bubblewrap = pkgs.bubblewrap;
+          jailed-shell = jailLib.makeJailedAgent {
+            name = "shell";
+            agent = pkgs.zsh;
+            subagents = ["pi" "claude"];
+          };
+
+          inherit (pkgs) bubblewrap;
         };
 
         # This root's quotient forms (`quotient help form`): `just quotient-forms`
