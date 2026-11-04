@@ -71,9 +71,6 @@
 
         # Environment forwarded into jail via bwrap --setenv
         jailEnvOptions = with jailLib.combinators; [
-          (try-fwd-env "DATABASE_URL")
-          (try-fwd-env "DOCKER_HOST")
-          (try-readwrite "/run/user/1000/docker.sock")
           (set-env "LD_LIBRARY_PATH" "${lib.makeLibraryPath [pkgs.stdenv.cc.cc.lib]}")
         ];
 
@@ -87,7 +84,6 @@
         jailPkgs = lib.optionalAttrs isLinux {
           jailed-pi = jailLib.makeJailedPi {
             profile = "specDev";
-            exposePostgres = true;
             allowSelfAsSubagent = true;
             maxSubagentDepth = 2;
             extraPkgs = projectPkgs;
@@ -200,6 +196,8 @@
               name = "satan-attrd-dev-tools";
               paths = devToolPkgs;
               ignoreCollisions = true;
+              # The dev-envs consumer's per-project env (flakes:SL-022).
+              passthru.devEnv.env.LD_LIBRARY_PATH = lib.makeLibraryPath [pkgs.stdenv.cc.cc.lib];
             };
           };
 
