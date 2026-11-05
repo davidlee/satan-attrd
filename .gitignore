@@ -4,7 +4,6 @@
 *.log
 .envrc
 
-/supabase/.*
 *.local.md
 
 # editor / agent scratch

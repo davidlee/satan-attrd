@@ -64,7 +64,6 @@
 
           stdenv.cc # cc/ld on PATH (linker for cargo build)
           stdenv.cc.cc.lib
-          supabase-cli
           spec-driver-pkg
         ];
         projectPkgs = devToolPkgs ++ [(jailLib.unjailed.codex or pkgs.codex)];
@@ -120,14 +119,12 @@
 
         # This root's quotient forms (`quotient help form`): `just quotient-forms`
         # links them at .quotient/forms, then `quotient allow`. They carry the
-        # dev tools and satan's local supabase database, the DSN the Justfile
-        # exports; the host's machine-default forms carry neither.
+        # dev tools; the host's machine-default forms do not.
         quotientFamily = jailLib.quotientFormFamily {
           inherit (inputs) quotient;
           packages = devToolPkgs;
           options = c:
             with c; [
-              (set-env "DATABASE_URL" "postgresql://postgres:postgres@127.0.0.1:54322/postgres")
               (set-env "LD_LIBRARY_PATH" "${lib.makeLibraryPath [pkgs.stdenv.cc.cc.lib]}")
             ];
         };

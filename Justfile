@@ -1,8 +1,9 @@
-# export DATABASE_URL := "postgres:///satan_memory_test?host=/run/postgresql"
+# This project's dev-db, a throwaway Postgres on a socket (`dev-db help`).
 # Tests treat DATABASE_URL purely as a server/role pointer: the harness
 # (tests/common/mod.rs) ignores the db component and provisions a fresh
 # disposable `satan_attrd_test_*` database per test.
-export DATABASE_URL := "postgresql://postgres:postgres@127.0.0.1:54322/postgres"
+export DEV_DB_NAME := "satan-attrd"
+export DATABASE_URL := "postgresql:///satan-attrd?host=/tmp/satan-attrd/db/run&port=5432&user=postgres"
 
 default: check
 
@@ -19,13 +20,13 @@ quotient-forms:
 # Full gate: lint + format + test
 check: lint format test
 
-# All tests (unit + integration). Integration tests require Postgres on $DATABASE_URL.
+# All tests (unit + integration). Integration tests start the dev-db.
 test: test-unit test-integration
 
 test-unit:
   cargo test --lib --bins
 
-test-integration:
+test-integration: db-up
   cargo test --test '*'
 
 # Lint with zero tolerance (policy lives in Cargo.toml [lints] + clippy.toml).
@@ -45,9 +46,19 @@ build:
   cargo build --release
 
 # Run migrations against $DATABASE_URL (T-attr-1b)
-migrate:
+migrate: db-up
   cargo run --release -- migrate
 
 # Run daemon (T-attr-1b+)
-run:
+run: db-up
   cargo run --release
+
+# Start the dev-db. Idempotent.
+db-up:
+  @dev-db up
+
+db-down:
+  dev-db down
+
+db-status:
+  dev-db status

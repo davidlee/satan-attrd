@@ -57,9 +57,8 @@ just migrate   # run migrations against $DATABASE_URL
 just run       # start daemon
 ```
 
-Requires PostgreSQL reachable at `$DATABASE_URL`. The Justfile
-defaults to the supabase-style local dev URL; override in your shell
-or `.envrc` for any other target.
+The Justfile points `$DATABASE_URL` at this project's dev-db, a throwaway
+Postgres on a unix socket, and starts it when a recipe needs it.
 
 ## License
 
