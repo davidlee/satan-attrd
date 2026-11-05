@@ -571,8 +571,7 @@ pub async fn gather_prior_actuals(
 #[expect(
     clippy::unwrap_used,
     clippy::indexing_slicing,
-    clippy::float_cmp,
-    reason = "test fixtures: unwrap on known-good values, index result vecs after length asserts, compare exact table constants; failures should surface loudly"
+    reason = "test fixtures: unwrap on known-good values, index result vecs after length asserts; failures should surface loudly"
 )]
 mod tests {
     use super::*;
@@ -714,9 +713,9 @@ mod tests {
         // worked has 4 non-zero entries.
         assert_eq!(events.len(), 4);
         for ev in &events {
-            assert!(ev.name != AttributeName::Friction);
-            assert!(ev.name != AttributeName::Suspicion);
-            assert!(ev.name != AttributeName::Metamorphosis);
+            assert_ne!(ev.name, AttributeName::Friction);
+            assert_ne!(ev.name, AttributeName::Suspicion);
+            assert_ne!(ev.name, AttributeName::Metamorphosis);
         }
     }
 
@@ -777,7 +776,7 @@ mod tests {
             .unwrap();
         assert!(close(friction.old_value, 0.50));
         assert!(close(friction.new_value, 0.20));
-        assert!(friction.caps_applied.is_empty());
+        assert_eq!(friction.caps_applied, Vec::new());
     }
 
     #[test]
@@ -1236,7 +1235,7 @@ mod tests {
         assert_eq!(ev.name, AttributeName::Shame);
         assert!(close(ev.old_value, 0.50));
         assert!(close(ev.new_value, 0.49));
-        assert!(ev.caps_applied.is_empty());
+        assert_eq!(ev.caps_applied, Vec::new());
         assert_eq!(ev.source, "maintenance");
         assert_eq!(ev.reason, "idle_decay");
     }

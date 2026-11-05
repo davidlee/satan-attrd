@@ -163,7 +163,7 @@ async fn event_insert_round_trip() {
     assert_eq!(row.source, "outcome");
     assert_eq!(row.reason, "contradicted");
     assert_eq!(row.evidence_json["confidence"], "medium");
-    assert!(row.caps_applied.as_array().unwrap().is_empty());
+    assert_eq!(row.caps_applied, serde_json::json!([]));
     assert!(!row.disabled);
 }
 

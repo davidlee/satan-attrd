@@ -179,7 +179,7 @@ async fn harmful_snapshot_freezes_friction_cap_inputs() {
         .iter()
         .find(|e| e.name == AttributeName::Friction)
         .unwrap();
-    assert!(friction.caps_applied.is_empty());
+    assert_eq!(friction.caps_applied, Vec::new());
     assert!(close(friction.new_value, 0.30));
 
     // Insert all four for round-trip.

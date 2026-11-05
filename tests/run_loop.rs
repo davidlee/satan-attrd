@@ -240,7 +240,7 @@ async fn outcome_inbox_rejects_bad_schema_version() {
         .fetch_all(&pool)
         .await
         .unwrap();
-    assert!(pending.is_empty());
+    assert_eq!(pending, Vec::new());
 }
 
 #[tokio::test]
