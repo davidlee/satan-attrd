@@ -5,16 +5,8 @@
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-parts.url = "github:hercules-ci/flake-parts";
     devshell.url = "github:numtide/devshell";
-    agents = {
-      url = "github:davidlee/nix-config?dir=flakes/agents";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
     spec-driver.url = "github:davidlee/spec-driver";
     doctrine.url = "github:davidlee/doctrine";
-    quotient = {
-      url = "github:davidlee/quotient";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
     rust-overlay.url = "github:oxalica/rust-overlay";
   };
 
@@ -44,13 +36,7 @@
         system,
         ...
       }: let
-        inherit (pkgs) lib stdenv;
-        isLinux = stdenv.hostPlatform.isLinux;
-
-        jailLib =
-          if isLinux
-          then inputs.agents.lib.${system}.mkJailedAgents {}
-          else {};
+        inherit (pkgs) lib;
 
         spec-driver-pkg = spec-driver.packages.${system}.default;
 
@@ -67,72 +53,6 @@
           stdenv.cc.cc.lib
           spec-driver-pkg
         ];
-        projectPkgs = devToolPkgs ++ [(jailLib.unjailed.codex or pkgs.codex)];
-
-        # Environment forwarded into jail via bwrap --setenv
-        jailEnvOptions = with jailLib.combinators; [
-          (set-env "LD_LIBRARY_PATH" "${lib.makeLibraryPath [pkgs.stdenv.cc.cc.lib]}")
-        ];
-
-        workspaceDeps = ["/home/david/.config/emacs/"];
-
-        # Every jail reaches models through the local LLM gateway with the
-        # shared `pi` key (~/.config/llm-gateway/keys/pi); no provider key
-        # enters a jail.
-        gateway = jailLib.gatewayClient "pi";
-
-        jailPkgs = lib.optionalAttrs isLinux {
-          jailed-pi = jailLib.makeJailedPi {
-            profile = "specDev";
-            allowSelfAsSubagent = true;
-            maxSubagentDepth = 2;
-            extraPkgs = projectPkgs;
-            extraOptions = jailEnvOptions;
-            inherit gateway workspaceDeps;
-          };
-          jailed-pi-research = jailLib.makeJailedPi {
-            name = "pi-research";
-            profile = "research";
-            extraPkgs = projectPkgs;
-            extraOptions = jailEnvOptions;
-            inherit gateway workspaceDeps;
-          };
-          jailed-claude = jailLib.makeJailedClaude {
-            profile = "specDev";
-            extraPkgs = projectPkgs;
-            extraOptions = jailEnvOptions;
-            inherit gateway workspaceDeps;
-          };
-          jailed-codex = jailLib.makeJailedCodex {
-            profile = "specDev";
-            extraPkgs = projectPkgs;
-            extraOptions = jailEnvOptions;
-            inherit gateway workspaceDeps;
-          };
-          jailed-shell = jailLib.makeJailedAgent {
-            name = "shell";
-            agent = pkgs.zsh;
-            subagents = ["pi" "claude"];
-          };
-
-          inherit (pkgs) bubblewrap;
-        };
-
-        # This root's quotient forms (`quotient help form`): `just quotient-forms`
-        # links them at .quotient/forms, then `quotient allow`. They carry the
-        # dev tools; the host's machine-default forms do not.
-        quotientFamily = jailLib.quotientFormFamily {
-          inherit (inputs) quotient;
-          packages = devToolPkgs;
-          options = c:
-            with c; [
-              (set-env "LD_LIBRARY_PATH" "${lib.makeLibraryPath [pkgs.stdenv.cc.cc.lib]}")
-            ];
-        };
-        quotientForms = lib.optionalAttrs isLinux {
-          quotient-read = quotientFamily.read;
-          quotient-write = quotientFamily.write;
-        };
 
         # Rust binary
         satan-attrd = pkgs.rustPlatform.buildRustPackage {
@@ -174,63 +94,34 @@
           overlays = [rust-overlay.overlays.default];
         };
 
-        # quotient's form contract over this root's forms.
-        checks = lib.optionalAttrs isLinux {
-          quotient-forms = inputs.quotient.lib.checkFormFamily {
-            inherit pkgs;
-            family = quotientFamily;
+        packages = {
+          inherit satan-attrd;
+          default = satan-attrd;
+          # The devshell's tool set as one closure, so the VM and the devshell
+          # can't drift.
+          dev-tools = pkgs.buildEnv {
+            name = "satan-attrd-dev-tools";
+            paths = devToolPkgs;
+            ignoreCollisions = true;
+            # The dev-envs consumer's per-project env (flakes:SL-022).
+            passthru.devEnv.env.LD_LIBRARY_PATH = lib.makeLibraryPath [pkgs.stdenv.cc.cc.lib];
+          };
+          # What the room takes: `dev-tools` plus Doctrine, as a room has no host install
+          # (flakes:DEC-130).
+          capsule-tools = pkgs.buildEnv {
+            name = "satan-attrd-capsule-tools";
+            paths = devToolPkgs ++ [inputs.doctrine.packages.${system}.default];
+            ignoreCollisions = true;
           };
         };
 
-        packages =
-          jailPkgs
-          // quotientForms
-          // {
-            inherit satan-attrd;
-            default = satan-attrd;
-            # The devshell's tool set as one closure, so the VM and the devshell
-            # can't drift.
-            dev-tools = pkgs.buildEnv {
-              name = "satan-attrd-dev-tools";
-              paths = devToolPkgs;
-              ignoreCollisions = true;
-              # The dev-envs consumer's per-project env (flakes:SL-022).
-              passthru.devEnv.env.LD_LIBRARY_PATH = lib.makeLibraryPath [pkgs.stdenv.cc.cc.lib];
-            };
-            # What the room takes: `dev-tools` plus Doctrine, as a room has no host install
-            # (flakes:DEC-130).
-            capsule-tools = pkgs.buildEnv {
-              name = "satan-attrd-capsule-tools";
-              paths = devToolPkgs ++ [inputs.doctrine.packages.${system}.default];
-              ignoreCollisions = true;
-            };
-          };
-
         devshells.default = {
-          packages = projectPkgs ++ lib.optionals isLinux (lib.attrValues jailPkgs);
+          packages = devToolPkgs;
 
           env = [
             {
               name = "LD_LIBRARY_PATH";
               value = lib.makeLibraryPath [pkgs.stdenv.cc.cc.lib];
-            }
-          ];
-
-          commands = [
-            {
-              name = "sdr";
-              help = "spec-driver";
-              command = "spec-driver $@";
-            }
-            {
-              name = "jpi";
-              help = "jailed-pi";
-              command = "jailed-pi $@";
-            }
-            {
-              name = "jcl";
-              help = "jailed-claude --dangerously-skip-permissions";
-              command = "jailed-claude --dangerously-skip-permissions $@";
             }
           ];
         };
