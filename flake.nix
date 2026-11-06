@@ -10,6 +10,7 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
     spec-driver.url = "github:davidlee/spec-driver";
+    doctrine.url = "github:davidlee/doctrine";
     quotient = {
       url = "github:davidlee/quotient";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -195,6 +196,13 @@
               ignoreCollisions = true;
               # The dev-envs consumer's per-project env (flakes:SL-022).
               passthru.devEnv.env.LD_LIBRARY_PATH = lib.makeLibraryPath [pkgs.stdenv.cc.cc.lib];
+            };
+            # What the room takes: `dev-tools` plus Doctrine, as a room has no host install
+            # (flakes:DEC-130).
+            capsule-tools = pkgs.buildEnv {
+              name = "satan-attrd-capsule-tools";
+              paths = devToolPkgs ++ [inputs.doctrine.packages.${system}.default];
+              ignoreCollisions = true;
             };
           };
 
