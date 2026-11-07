@@ -1092,6 +1092,33 @@ mod tests {
             sensor_base_deltas(SensorReason::AskUncorrelated),
             [0.0, 0.0, 0.0, 0.025, 0.0, 0.0, 0.0, 0.025]
         );
+        assert_eq!(
+            sensor_base_deltas(SensorReason::ContentBacklog),
+            [0.025, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        );
+    }
+
+    #[test]
+    fn dispatch_sensor_content_backlog_affects_only_curiosity() {
+        let mut input = sensor_input(SensorReason::ContentBacklog);
+        input.metric_value = 40.0;
+        let counter = Counter::new();
+        let events = dispatch_sensor(&input, &counter);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].name, AttributeName::Curiosity);
+        // Unscaled: the count is evidence, never a multiplier.
+        assert!(close(events[0].delta(), 0.025));
+    }
+
+    #[test]
+    fn dispatch_sensor_content_backlog_at_ceiling() {
+        let mut input = sensor_input(SensorReason::ContentBacklog);
+        input.projection.insert(AttributeName::Curiosity, 1.0);
+        let counter = Counter::new();
+        let events = dispatch_sensor(&input, &counter);
+        assert_eq!(events.len(), 1);
+        assert!(close(events[0].new_value, 1.0));
+        assert!(events[0].caps_applied.contains(&Cap::RangeClamp));
     }
 
     #[test]

@@ -740,6 +740,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn sensor_payload_accepts_content_probe_fields() {
+        let payload = serde_json::json!({
+            "schema_version": 1,
+            "source": "sensor",
+            "run_id": "r1",
+            "ts": "2026-11-07T20:49:22.288+11:00",
+            "reason": "content_backlog",
+            "sensor_type": "panopticon_content_backlog",
+            "metric_value": 3,
+            "metric_unit": "uninspected_captures",
+            "is_revision": false,
+            "enabled": true,
+        });
+        let parsed = parse_sensor_payload(&payload).unwrap();
+        assert_eq!(parsed.reason, SensorReason::ContentBacklog);
+        assert_eq!(parsed.sensor_type, "panopticon_content_backlog");
+        assert_eq!(parsed.metric_unit, "uninspected_captures");
+        assert!(parsed.enabled);
+    }
+
+    #[test]
     fn lru_evicts_oldest_run_id() {
         let mut lru = LruCounterMap::new(3);
         lru.get_or_create("r1");

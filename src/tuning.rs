@@ -112,5 +112,6 @@ pub const fn sensor_base_deltas(reason: SensorReason) -> [f64; 8] {
         }
         SensorReason::AskSuppressed => [TINY, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, TINY],
         SensorReason::AskUncorrelated => [0.0, 0.0, 0.0, TINY, 0.0, 0.0, 0.0, TINY],
+        SensorReason::ContentBacklog => [TINY, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
     }
 }

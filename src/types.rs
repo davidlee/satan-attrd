@@ -313,6 +313,7 @@ pub enum SensorReason {
     Reading,
     AskSuppressed,
     AskUncorrelated,
+    ContentBacklog,
 }
 
 impl SensorReason {
@@ -325,6 +326,7 @@ impl SensorReason {
             Self::Reading => "reading",
             Self::AskSuppressed => "ask_suppressed",
             Self::AskUncorrelated => "ask_uncorrelated",
+            Self::ContentBacklog => "content_backlog",
         }
     }
 }
@@ -345,6 +347,7 @@ impl FromStr for SensorReason {
             "reading" => Ok(Self::Reading),
             "ask_suppressed" => Ok(Self::AskSuppressed),
             "ask_uncorrelated" => Ok(Self::AskUncorrelated),
+            "content_backlog" => Ok(Self::ContentBacklog),
             other => Err(crate::error::Error::InvalidReason {
                 source_name: Source::Sensor.as_str().to_string(),
                 reason: other.to_string(),
@@ -499,6 +502,7 @@ mod tests {
             SensorReason::Reading,
             SensorReason::AskSuppressed,
             SensorReason::AskUncorrelated,
+            SensorReason::ContentBacklog,
         ] {
             assert_eq!(SensorReason::from_str(r.as_str()).unwrap(), r);
         }
